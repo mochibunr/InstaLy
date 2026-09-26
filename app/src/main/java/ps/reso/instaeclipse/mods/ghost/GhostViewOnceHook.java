@@ -24,7 +24,7 @@ public class GhostViewOnceHook {
             Method cached = DexKitCache.loadMethod("GhostViewOnce", Module.hostClassLoader);
             if (cached != null) {
                 XposedBridge.hookMethod(cached, buildViewOnceHook());
-                ModuleLog.line("(InstaEclipse | ViewOnce): ✅ Hooked (cached): "
+                ModuleLog.line("(InstaLy | ViewOnce): ✅ Hooked (cached): "
                         + cached.getDeclaringClass().getName() + "." + cached.getName());
                 FeatureStatusTracker.setHooked("GhostViewOnce");
                 return;
@@ -51,7 +51,7 @@ public class GhostViewOnceHook {
             return;
         }
 
-        ModuleLog.line("(InstaEclipse | ViewOnce): ❌ No view-once seen-reporter method found");
+        ModuleLog.line("(InstaLy | ViewOnce): ❌ No view-once seen-reporter method found");
     }
 
     /**
@@ -74,13 +74,13 @@ public class GhostViewOnceHook {
 
                 DexKitCache.saveMethod("GhostViewOnce", reflectMethod);
                 XposedBridge.hookMethod(reflectMethod, buildViewOnceHook());
-                ModuleLog.line("(InstaEclipse | ViewOnce): ✅ Hooked (" + tag + "): "
+                ModuleLog.line("(InstaLy | ViewOnce): ✅ Hooked (" + tag + "): "
                         + method.getClassName() + "." + method.getName());
                 FeatureStatusTracker.setHooked("GhostViewOnce");
                 return true;
             }
         } catch (Throwable e) {
-            ModuleLog.line("(InstaEclipse | ViewOnce): ❌ Exception (" + tag + "): " + e.getMessage());
+            ModuleLog.line("(InstaLy | ViewOnce): ❌ Exception (" + tag + "): " + e.getMessage());
         }
         return false;
     }
