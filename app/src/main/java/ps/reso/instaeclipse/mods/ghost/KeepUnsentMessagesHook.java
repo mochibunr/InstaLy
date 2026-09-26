@@ -123,7 +123,7 @@ public class KeepUnsentMessagesHook {
                     if (param.args.length > 0) {
                         String id = threadIdOf(param.args[0]);
                         Object flag = param.args.length > 1 ? param.args[1] : null;
-                        ModuleLog.line("(IE|KeepUnsent|PROBE) igThreadIgid id=" + id + " flag=" + flag);
+                        ModuleLog.line("(InstaLy | KeepUnsent|PROBE) igThreadIgid id=" + id + " flag=" + flag);
                         // Only treat flag==true as "thread entered/visible" to avoid background sync
                         // overwriting the current thread with other threads' ids.
                         if (id != null && Boolean.TRUE.equals(flag)) {
@@ -138,9 +138,9 @@ public class KeepUnsentMessagesHook {
                 try { XposedBridge.hookMethod(md.getMethodInstance(classLoader), hook); n++; }
                 catch (Throwable ignored) {}
             }
-            ModuleLog.line("(IE|KeepUnsent) current-thread tracker hooked " + n + " method(s)");
+            ModuleLog.line("(InstaLy | KeepUnsent) current-thread tracker hooked " + n + " method(s)");
         } catch (Throwable t) {
-            ModuleLog.line("(IE|KeepUnsent) ⚠️ current-thread tracker: " + t.getMessage());
+            ModuleLog.line("(InstaLy | KeepUnsent) ⚠️ current-thread tracker: " + t.getMessage());
         }
     }
 
@@ -226,7 +226,7 @@ public class KeepUnsentMessagesHook {
                         ids.append(' ').append(a);
                     }
                 }
-                ModuleLog.line("(IE|KeepUnsent) blocked local removal; thread=" + threadId + " ids=[" + ids.toString().trim() + "]");
+                ModuleLog.line("(InstaLy | KeepUnsent) blocked local removal; thread=" + threadId + " ids=[" + ids.toString().trim() + "]");
                 param.setResult(null); // skip local removal
             }
         };
@@ -236,7 +236,7 @@ public class KeepUnsentMessagesHook {
             if (cached != null && !cached.isEmpty()) {
                 for (Method m : cached) XposedBridge.hookMethod(m, hook);
                 FeatureStatusTracker.setHooked("KeepUnsentMessages");
-                ModuleLog.line("(IE|KeepUnsent) ✅ remove hooked (cached) " + cached.size());
+                ModuleLog.line("(InstaLy | KeepUnsent) ✅ remove hooked (cached) " + cached.size());
                 return;
             }
         }
@@ -262,16 +262,16 @@ public class KeepUnsentMessagesHook {
                         m.setAccessible(true);
                         XposedBridge.hookMethod(m, hook);
                         hooked.add(m);
-                        ModuleLog.line("(IE|KeepUnsent) ✅ remove hook → " + store.getName() + "." + m.getName() + " (" + p.length + "-arg)");
-                    } catch (Throwable t) { ModuleLog.line("(IE|KeepUnsent) ⚠️ " + t.getMessage()); }
+                        ModuleLog.line("(InstaLy | KeepUnsent) ✅ remove hook → " + store.getName() + "." + m.getName() + " (" + p.length + "-arg)");
+                    } catch (Throwable t) { ModuleLog.line("(InstaLy | KeepUnsent) ⚠️ " + t.getMessage()); }
                 }
                 if (!hooked.isEmpty()) break;
             }
-            if (hooked.isEmpty()) { ModuleLog.line("(IE|KeepUnsent) ❌ remove primitive not found"); return; }
+            if (hooked.isEmpty()) { ModuleLog.line("(InstaLy | KeepUnsent) ❌ remove primitive not found"); return; }
             DexKitCache.saveMethods(CACHE_KEY, hooked);
             FeatureStatusTracker.setHooked("KeepUnsentMessages");
         } catch (Throwable t) {
-            ModuleLog.line("(IE|KeepUnsent) ❌ remove: " + t);
+            ModuleLog.line("(InstaLy | KeepUnsent) ❌ remove: " + t);
         }
     }
 
@@ -335,9 +335,9 @@ public class KeepUnsentMessagesHook {
                             if (!present) { liveList.add(msg); added++; }
                         }
                     }
-                    if (added > 0) ModuleLog.line("(IE|KeepUnsent) ✅ re-injected " + added + " kept msg(s) into this thread");
+                    if (added > 0) ModuleLog.line("(InstaLy | KeepUnsent) ✅ re-injected " + added + " kept msg(s) into this thread");
                 } catch (Throwable t) {
-                    ModuleLog.line("(IE|KeepUnsent) ❌ reconcile body: " + t);
+                    ModuleLog.line("(InstaLy | KeepUnsent) ❌ reconcile body: " + t);
                 }
             }
         };
@@ -362,13 +362,13 @@ public class KeepUnsentMessagesHook {
                     if (!rest) continue;
                     m.setAccessible(true);
                     XposedBridge.hookMethod(m, hook);
-                    ModuleLog.line("(IE|KeepUnsent) ✅ reconcile hook → " + c.getName() + "." + m.getName());
+                    ModuleLog.line("(InstaLy | KeepUnsent) ✅ reconcile hook → " + c.getName() + "." + m.getName());
                     return;
                 }
             }
-            ModuleLog.line("(IE|KeepUnsent) ❌ reconcile method not found");
+            ModuleLog.line("(InstaLy | KeepUnsent) ❌ reconcile method not found");
         } catch (Throwable t) {
-            ModuleLog.line("(IE|KeepUnsent) ❌ reconcile resolve: " + t);
+            ModuleLog.line("(InstaLy | KeepUnsent) ❌ reconcile resolve: " + t);
         }
     }
 
@@ -411,10 +411,10 @@ public class KeepUnsentMessagesHook {
             // Embed the chat's username (best-effort) so the Unsent viewer can show it per folder.
             String who = ThreadNames.get(threadId);
             ps.reso.instaeclipse.utils.ghost.UnsentLog.add(threadId, who, val); // persistent per-thread log
-            ModuleLog.line("(IE|KeepUnsent) ✅ logged (thread=" + threadId + " who=" + who + "): " + (val.length() > 24 ? val.substring(0, 24) + "…" : val));
+            ModuleLog.line("(InstaLy | KeepUnsent) ✅ logged (thread=" + threadId + " who=" + who + "): " + (val.length() > 24 ? val.substring(0, 24) + "…" : val));
         } catch (Throwable t) {
             markedIds.remove(id);
-            ModuleLog.line("(IE|KeepUnsent) ⚠️ log failed: " + t.getMessage());
+            ModuleLog.line("(InstaLy | KeepUnsent) ⚠️ log failed: " + t.getMessage());
         }
     }
 

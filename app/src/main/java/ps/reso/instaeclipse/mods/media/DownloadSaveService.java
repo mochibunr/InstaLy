@@ -146,7 +146,7 @@ public class DownloadSaveService extends Service {
             });
             MediaTypeDetector.Result detected = MediaTypeDetector.resolve(
                     tmp, responseType, mimeType, filename);
-            ModuleLog.line("(IE|DL|Type) requested=" + mimeType + " response=" + responseType
+            ModuleLog.line("(InstaLy | DL|Type) requested=" + mimeType + " response=" + responseType
                     + " detected=" + detected.kind + " file=" + detected.filename);
             pushProgress("Saving…", 97, 100, false);
             Uri uri = writeViaSaf(tmp, detected.filename, detected.mimeType,

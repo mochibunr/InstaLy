@@ -109,7 +109,7 @@ public class StoryDownloadHook {
                     break;
                 } catch (Throwable ignored) {}
             }
-        } catch (Throwable t) { ModuleLog.line("(IE|StoryCache) expiring getter: " + t); }
+        } catch (Throwable t) { ModuleLog.line("(InstaLy | StoryCache) expiring getter: " + t); }
     }
 
     /**
@@ -135,8 +135,8 @@ public class StoryDownloadHook {
                 try { XposedBridge.hookMethod(md.getMethodInstance(cl), capture); n++; } catch (Throwable ignored) {}
             }
             if (n > 0 && FeatureFlags.cacheStories) FeatureStatusTracker.setHooked("CacheStories");
-            ModuleLog.line("(IE|StoryCache) capture hook: " + n + " method(s)");
-        } catch (Throwable t) { ModuleLog.line("(IE|StoryCache) ⚠️ capture hook: " + t.getMessage()); }
+            ModuleLog.line("(InstaLy | StoryCache) capture hook: " + n + " method(s)");
+        } catch (Throwable t) { ModuleLog.line("(InstaLy | StoryCache) ⚠️ capture hook: " + t.getMessage()); }
     }
 
     private void captureFromReelItem(Object reelItem) {
@@ -168,7 +168,7 @@ public class StoryDownloadHook {
             final String fid = id, fauthor = author; final long fexp = expiring;
             FeedVideoDownloadHook.executor.submit(() ->
                     ps.reso.instaeclipse.utils.media.StoryCache.capture(fid, fauthor, url, video, fexp));
-        } catch (Throwable t) { ModuleLog.line("(IE|StoryCache) captureFromReelItem: " + t); }
+        } catch (Throwable t) { ModuleLog.line("(InstaLy | StoryCache) captureFromReelItem: " + t); }
     }
 
     // ── Hook 1: inject "Download" into the story options button list ──────────
@@ -190,7 +190,7 @@ public class StoryDownloadHook {
                     .matcher(MethodMatcher.create()
                             .usingStrings("[INTERNAL] Pause Playback")));
             if (methods.isEmpty()) {
-                ModuleLog.line("(IE|Story) ❌ Button builder method not found");
+                ModuleLog.line("(InstaLy | Story) ❌ Button builder method not found");
                 return;
             }
 
@@ -224,10 +224,10 @@ public class StoryDownloadHook {
                     }
                 } catch (Throwable ignored) {}
             }
-            ModuleLog.line("(IE|Story) button injector hooked " + hooked + " builder(s)");
-            if (hooked == 0) ModuleLog.line("(IE|Story) ❌ No CharSequence[] return type candidate found");
+            ModuleLog.line("(InstaLy | Story) button injector hooked " + hooked + " builder(s)");
+            if (hooked == 0) ModuleLog.line("(InstaLy | Story) ❌ No CharSequence[] return type candidate found");
         } catch (Throwable t) {
-            ModuleLog.line("(IE|Story) ❌ Button builder DexKit: " + t);
+            ModuleLog.line("(InstaLy | Story) ❌ Button builder DexKit: " + t);
         }
     }
 
@@ -254,11 +254,11 @@ public class StoryDownloadHook {
                             .returnType("void")
                             .usingStrings("[INTERNAL] Pause Playback")));
         } catch (Throwable t) {
-            ModuleLog.line("(IE|Story) ❌ Click handler DexKit: " + t);
+            ModuleLog.line("(InstaLy | Story) ❌ Click handler DexKit: " + t);
             return;
         }
         if (methods == null || methods.isEmpty()) {
-            ModuleLog.line("(IE|Story) ❌ Click handler not found");
+            ModuleLog.line("(InstaLy | Story) ❌ Click handler not found");
             return;
         }
 
@@ -287,7 +287,7 @@ public class StoryDownloadHook {
                 //    SEPARATE args, so search 'this' AND every argument, not just the holder.
                 Context ctx = findContextAcrossParam(param, effectiveHolder);
                 if (ctx == null) {
-                    ModuleLog.line("(IE|Story) ❌ Context not found");
+                    ModuleLog.line("(InstaLy | Story) ❌ Context not found");
                     return;
                 }
 
@@ -314,10 +314,10 @@ public class StoryDownloadHook {
             } catch (Throwable ignored) {}
         }
         if (hooked == 0) {
-            ModuleLog.line("(IE|Story) ❌ no click dispatcher hooked");
+            ModuleLog.line("(InstaLy | Story) ❌ no click dispatcher hooked");
             return;
         }
-        ModuleLog.line("(IE|Story) click handler hooked " + hooked + " dispatcher(s)");
+        ModuleLog.line("(InstaLy | Story) click handler hooked " + hooked + " dispatcher(s)");
         FeatureStatusTracker.setHooked("StoryDownload");
     }
 
@@ -382,7 +382,7 @@ public class StoryDownloadHook {
         if (holder == null) return null;
         try {
             Object reelItem = readFieldByTypeName(holder, "com.instagram.model.reels.ReelItem");
-            ModuleLog.line("(IE|Story) reelItem=" +
+            ModuleLog.line("(InstaLy | Story) reelItem=" +
                     (reelItem != null ? reelItem.getClass().getName() : "null"));
 
             Object target = reelItem != null ? reelItem : holder;
@@ -424,11 +424,11 @@ public class StoryDownloadHook {
                 List<CandidateInfo> candidates = new ArrayList<>();
                 collectImageCandidates(target, candidates,
                         Collections.newSetFromMap(new IdentityHashMap<>()), 0);
-                ModuleLog.line("(IE|Story) imageCandidates=" + candidates.size());
+                ModuleLog.line("(InstaLy | Story) imageCandidates=" + candidates.size());
                 if (!candidates.isEmpty()) {
                     candidates.sort((a, b) -> Integer.compare(b.area, a.area));
                     imageUrl = candidates.get(0).url;
-                    ModuleLog.line("(IE|Story) bestCandidate area=" + candidates.get(0).area);
+                    ModuleLog.line("(InstaLy | Story) bestCandidate area=" + candidates.get(0).area);
                 }
             }
 
@@ -453,7 +453,7 @@ public class StoryDownloadHook {
             return new StoryMediaOptions(imageUrl, videoUrl, modelSaysVideo);
 
         } catch (Throwable t) {
-            ModuleLog.line("(IE|Story) extractStoryMediaOptions error: " + t);
+            ModuleLog.line("(InstaLy | Story) extractStoryMediaOptions error: " + t);
         }
         return null;
     }
@@ -777,10 +777,10 @@ public class StoryDownloadHook {
      */
     private static String extractUsernameFromReelItemHolder(Object holder) {
         if (holder == null) {
-            ModuleLog.line("(IE|Story|Username) holder is null");
+            ModuleLog.line("(InstaLy | Story|Username) holder is null");
             return null;
         }
-        ModuleLog.line("(IE|Story|Username) searching in holder=" + holder.getClass().getName());
+        ModuleLog.line("(InstaLy | Story|Username) searching in holder=" + holder.getClass().getName());
         try {
             // Step 1: find the ReelItem field on the holder
             Object reelItem = null;
@@ -793,7 +793,7 @@ public class StoryDownloadHook {
                         if (val != null && val.getClass().getName()
                                 .equals("com.instagram.model.reels.ReelItem")) {
                             reelItem = val;
-                            ModuleLog.line("(IE|Story|Username) found ReelItem in field="
+                            ModuleLog.line("(InstaLy | Story|Username) found ReelItem in field="
                                     + f.getName() + " on " + cls.getName());
                             break;
                         }
@@ -805,10 +805,10 @@ public class StoryDownloadHook {
             if (reelItem == null && holder.getClass().getName()
                     .equals("com.instagram.model.reels.ReelItem")) {
                 reelItem = holder;
-                ModuleLog.line("(IE|Story|Username) holder is itself a ReelItem");
+                ModuleLog.line("(InstaLy | Story|Username) holder is itself a ReelItem");
             }
             if (reelItem == null) {
-                ModuleLog.line("(IE|Story|Username) ❌ ReelItem not found in holder");
+                ModuleLog.line("(InstaLy | Story|Username) ❌ ReelItem not found in holder");
                 return null;
             }
 
@@ -830,7 +830,7 @@ public class StoryDownloadHook {
                     if (candidateClass.equals("com.instagram.user.model.User")) {
                         String username = UserUtils.callUsernameGetter(candidate);
                         if (username != null) {
-                            ModuleLog.line("(IE|Story|Username) reelItem." + m.getName() + "() [User] → " + username);
+                            ModuleLog.line("(InstaLy | Story|Username) reelItem." + m.getName() + "() [User] → " + username);
                             return username;
                         }
                         continue;
@@ -840,7 +840,7 @@ public class StoryDownloadHook {
                     if (candidateClass.equals("com.instagram.feed.media.Media")) {
                         String username = FeedVideoDownloadHook.extractUsernameFromMediaObject(candidate);
                         if (username != null) {
-                            ModuleLog.line("(IE|Story|Username) reelItem." + m.getName()
+                            ModuleLog.line("(InstaLy | Story|Username) reelItem." + m.getName()
                                     + "() [Media] → " + username);
                             return username;
                         }
@@ -849,9 +849,9 @@ public class StoryDownloadHook {
                 } catch (Throwable ignored) {}
             }
 
-            ModuleLog.line("(IE|Story|Username) ❌ username not found on ReelItem methods");
+            ModuleLog.line("(InstaLy | Story|Username) ❌ username not found on ReelItem methods");
         } catch (Throwable t) {
-            ModuleLog.line("(IE|Story|Username) ❌ Exception: " + t);
+            ModuleLog.line("(InstaLy | Story|Username) ❌ Exception: " + t);
         }
         return null;
     }
@@ -997,7 +997,7 @@ public class StoryDownloadHook {
             }
             dialog.show();
         } catch (Throwable t) {
-            ModuleLog.line("(IE|Story) format dialog failed: " + t);
+            ModuleLog.line("(InstaLy | Story) format dialog failed: " + t);
             Toast.makeText(ctx, I18n.t(ctx, R.string.ig_toast_download_failed,
                     t.getMessage()), Toast.LENGTH_SHORT).show();
         }
@@ -1031,7 +1031,7 @@ public class StoryDownloadHook {
     private void startDownload(Context ctx, String url, boolean isVideo,
                                String username, String mediaId) {
         String fn = FeedVideoDownloadHook.buildFilename(username, "story", mediaId, isVideo);
-        ModuleLog.line("(IE|Story|DL) username=" + username + " mediaId=" + mediaId
+        ModuleLog.line("(InstaLy | Story|DL) username=" + username + " mediaId=" + mediaId
                 + " file=" + fn);
         Toast.makeText(ctx, isVideo ? I18n.t(ctx, R.string.ig_toast_downloading_story_video) : I18n.t(ctx, R.string.ig_toast_downloading_story_photo), Toast.LENGTH_SHORT).show();
         mainHandler.post(() -> new Thread(() -> {

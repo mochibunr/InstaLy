@@ -117,10 +117,11 @@ public final class FloatingIosBottomNavHook {
             originalParent.setVisibility(View.GONE);
         }
 
+        final int nativeBarHeight = Math.max(1, bar.getHeight());
         LiquidGlassContainer wrapper = new LiquidGlassContainer(activity, root, bar);
         FrameLayout.LayoutParams wrapperLp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
+                nativeBarHeight,
                 Gravity.BOTTOM
         );
         wrapperLp.leftMargin = sideMargin;
@@ -129,7 +130,7 @@ public final class FloatingIosBottomNavHook {
 
         FrameLayout.LayoutParams barLp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT,
+                nativeBarHeight,
                 Gravity.CENTER
         );
         bar.setLayoutParams(barLp);
@@ -170,7 +171,8 @@ public final class FloatingIosBottomNavHook {
 
         FeatureStatusTracker.setHooked(FEATURE_KEY);
         ModuleLog.line("(InstaLy | FloatingNav): applied liquid glass to "
-                + describeView(activity, bar));
+                + describeView(activity, bar)
+                + ", wrapperHeight=" + nativeBarHeight + "px");
 
         wrapper.post(wrapper::requestCapture);
     }
@@ -522,9 +524,12 @@ public final class FloatingIosBottomNavHook {
         }
 
         void addNativeBar(ViewGroup bar) {
+            // The outer container is explicitly locked to Instagram's already-measured native
+            // bar height. MATCH_PARENT here is therefore safe and prevents the background glass
+            // layers from forcing a WRAP_CONTENT FrameLayout to expand to the full viewport.
             FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT,
                     Gravity.CENTER
             );
             addView(bar, lp);

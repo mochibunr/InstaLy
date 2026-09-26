@@ -71,7 +71,7 @@ public class RemoveMetaAIHook {
                 if (id != 0) targetLayoutIds.add(id);
             }
             idsResolved = true;
-            ModuleLog.line("(IE|RemoveMetaAI) resolved " + targetLayoutIds.size() + " Meta AI layouts");
+            ModuleLog.line("(InstaLy | RemoveMetaAI) resolved " + targetLayoutIds.size() + " Meta AI layouts");
         } catch (Throwable ignored) {}
     }
 
@@ -90,7 +90,7 @@ public class RemoveMetaAIHook {
                     try {
                         String rn = result.getResources().getResourceEntryName(resource);
                         if (rn != null && (rn.contains("meta") || rn.contains("_ai_") || rn.endsWith("_ai")))
-                            ModuleLog.line("(IE|RemoveMetaAI|PROBE) inflated: " + rn);
+                            ModuleLog.line("(InstaLy | RemoveMetaAI|PROBE) inflated: " + rn);
                     } catch (Throwable ignored) {}
                     ensureIds(result);
                     if (targetLayoutIds.isEmpty() || !targetLayoutIds.contains(resource)) return;
@@ -114,16 +114,16 @@ public class RemoveMetaAIHook {
             XposedHelpers.findAndHookMethod(LayoutInflater.class, "inflate",
                     int.class, ViewGroup.class, boolean.class, inflateHook);
         } catch (Throwable t) {
-            ModuleLog.line("(IE|RemoveMetaAI) ⚠️ inflate(3) hook: " + t.getMessage());
+            ModuleLog.line("(InstaLy | RemoveMetaAI) ⚠️ inflate(3) hook: " + t.getMessage());
         }
         try {
             XposedHelpers.findAndHookMethod(LayoutInflater.class, "inflate",
                     int.class, ViewGroup.class, inflateHook);
         } catch (Throwable t) {
-            ModuleLog.line("(IE|RemoveMetaAI) ⚠️ inflate(2) hook: " + t.getMessage());
+            ModuleLog.line("(InstaLy | RemoveMetaAI) ⚠️ inflate(2) hook: " + t.getMessage());
         }
         FeatureStatusTracker.setHooked("RemoveMetaAI");
-        ModuleLog.line("(IE|RemoveMetaAI) ✅ installed");
+        ModuleLog.line("(InstaLy | RemoveMetaAI) ✅ installed");
     }
 
     /**
@@ -223,9 +223,9 @@ public class RemoveMetaAIHook {
                 try { XposedBridge.hookMethod(md.getMethodInstance(cl), hook); n++; } catch (Throwable ignored) {}
             }
         } catch (Throwable t) {
-            ModuleLog.line("(IE|RemoveMetaAI) ⚠️ " + label + ": " + t.getMessage());
+            ModuleLog.line("(InstaLy | RemoveMetaAI) ⚠️ " + label + ": " + t.getMessage());
         }
-        ModuleLog.line("(IE|RemoveMetaAI) " + label + ": " + n + " method(s)");
+        ModuleLog.line("(InstaLy | RemoveMetaAI) " + label + ": " + n + " method(s)");
     }
 
     /**
@@ -245,7 +245,7 @@ public class RemoveMetaAIHook {
                     if (r instanceof java.util.Collection) { ((java.util.Collection<?>) r).clear(); }
                     else if (r instanceof java.util.Map) { ((java.util.Map<?, ?>) r).clear(); }
                     else if (r instanceof Object[]) { p.setResult(java.util.Arrays.copyOf((Object[]) r, 0)); }
-                    else { ModuleLog.probe("(IE|RemoveMetaAI) serp-hcm result type=" + r.getClass().getName()); }
+                    else { ModuleLog.probe("(InstaLy | RemoveMetaAI) serp-hcm result type=" + r.getClass().getName()); }
                 } catch (Throwable ignored) {}
             }
         };
@@ -256,9 +256,9 @@ public class RemoveMetaAIHook {
                 try { XposedBridge.hookMethod(md.getMethodInstance(cl), neuter); n++; } catch (Throwable ignored) {}
             }
         } catch (Throwable t) {
-            ModuleLog.line("(IE|RemoveMetaAI) ⚠️ search-serp-hcm: " + t.getMessage());
+            ModuleLog.line("(InstaLy | RemoveMetaAI) ⚠️ search-serp-hcm: " + t.getMessage());
         }
-        ModuleLog.line("(IE|RemoveMetaAI) search-serp-hcm: " + n + " method(s)");
+        ModuleLog.line("(InstaLy | RemoveMetaAI) search-serp-hcm: " + n + " method(s)");
     }
 
     /**
@@ -291,10 +291,10 @@ public class RemoveMetaAIHook {
                     catch (Throwable ignored) {}
                 }
             } catch (Throwable t) {
-                ModuleLog.line("(IE|RemoveMetaAI) ⚠️ reels-card anchor " + a + ": " + t.getMessage());
+                ModuleLog.line("(InstaLy | RemoveMetaAI) ⚠️ reels-card anchor " + a + ": " + t.getMessage());
             }
         }
-        ModuleLog.line("(IE|RemoveMetaAI) reels-card eligibility: " + n + " method(s)");
+        ModuleLog.line("(InstaLy | RemoveMetaAI) reels-card eligibility: " + n + " method(s)");
     }
 
     /**
@@ -328,9 +328,9 @@ public class RemoveMetaAIHook {
                 catch (Throwable ignored) {}
             }
         } catch (Throwable t) {
-            ModuleLog.line("(IE|RemoveMetaAI) ⚠️ video-attribution: " + t.getMessage());
+            ModuleLog.line("(InstaLy | RemoveMetaAI) ⚠️ video-attribution: " + t.getMessage());
         }
-        ModuleLog.line("(IE|RemoveMetaAI) video-attribution: " + n + " method(s)");
+        ModuleLog.line("(InstaLy | RemoveMetaAI) video-attribution: " + n + " method(s)");
     }
 
     // Meta-AI-reels-entrypoint eligibility gate. The reel more-options "blue circle" Meta AI
@@ -352,7 +352,7 @@ public class RemoveMetaAIHook {
         int n = hookGate(bridge, classLoader, forceFalse, new Number[]{META_AI_GATE_ID_1, META_AI_GATE_ID_2});
         if (n == 0) n = hookGate(bridge, classLoader, forceFalse, new Number[]{META_AI_GATE_ID_1});
         if (n == 0) n = hookGate(bridge, classLoader, forceFalse, new Number[]{META_AI_GATE_ID_2});
-        ModuleLog.line("(IE|RemoveMetaAI) reels-overflow gate: " + n + " method(s)");
+        ModuleLog.line("(InstaLy | RemoveMetaAI) reels-overflow gate: " + n + " method(s)");
     }
 
     private int hookGate(DexKitBridge bridge, ClassLoader cl, XC_MethodHook hook, Number[] ids) {
@@ -367,7 +367,7 @@ public class RemoveMetaAIHook {
                 catch (Throwable ignored) {}
             }
         } catch (Throwable t) {
-            ModuleLog.line("(IE|RemoveMetaAI) ⚠️ overflow gate: " + t.getMessage());
+            ModuleLog.line("(InstaLy | RemoveMetaAI) ⚠️ overflow gate: " + t.getMessage());
         }
         return n;
     }
@@ -392,7 +392,7 @@ public class RemoveMetaAIHook {
                         lastMenuLog = now;
                         StringBuilder sb = new StringBuilder();
                         for (Object o : src) sb.append(o).append(",");
-                        ModuleLog.line("(IE|RemoveMetaAI|PROBE) menu opts=[" + sb + "]");
+                        ModuleLog.line("(InstaLy | RemoveMetaAI|PROBE) menu opts=[" + sb + "]");
                     }
                     List<Object> keep = new java.util.ArrayList<>(src.size());
                     boolean changed = false;
@@ -435,9 +435,9 @@ public class RemoveMetaAIHook {
             for (MethodData md : bridge.findMethod(q)) {
                 try { XposedBridge.hookMethod(md.getMethodInstance(cl), hook); n++; } catch (Throwable ignored) {}
             }
-            ModuleLog.line("(IE|RemoveMetaAI) " + label + " filter: " + n + " method(s)");
+            ModuleLog.line("(InstaLy | RemoveMetaAI) " + label + " filter: " + n + " method(s)");
         } catch (Throwable t) {
-            ModuleLog.line("(IE|RemoveMetaAI) ⚠️ " + label + ": " + t.getMessage());
+            ModuleLog.line("(InstaLy | RemoveMetaAI) ⚠️ " + label + ": " + t.getMessage());
         }
     }
 

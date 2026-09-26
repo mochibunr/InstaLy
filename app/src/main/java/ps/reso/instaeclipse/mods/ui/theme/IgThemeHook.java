@@ -46,9 +46,9 @@ public class IgThemeHook {
             hookPhoneWindowColors(classLoader);
             installed = true;
             FeatureStatusTracker.setHooked("CustomTheme");
-            ModuleLog.line("(InstaEclipse | Theme): hooks installed enabled=" + FeatureFlags.customThemeEnabled);
+            ModuleLog.line("(InstaLy | Theme): hooks installed enabled=" + FeatureFlags.customThemeEnabled);
         } catch (Throwable t) {
-            ModuleLog.line("(InstaEclipse | Theme): hook failed", t);
+            ModuleLog.line("(InstaLy | Theme): hook failed", t);
         }
     }
 
@@ -244,7 +244,7 @@ public class IgThemeHook {
         try {
             XposedHelpers.findAndHookMethod("com.android.internal.policy.PhoneWindow", cl, "setStatusBarColor", int.class, statusHook);
             XposedHelpers.findAndHookMethod("com.android.internal.policy.PhoneWindow", cl, "setNavigationBarColor", int.class, navHook);
-            ModuleLog.line("(InstaEclipse | Theme): PhoneWindow color hooks installed");
+            ModuleLog.line("(InstaLy | Theme): PhoneWindow color hooks installed");
             return true;
         } catch (Throwable ignored) {
             return false;

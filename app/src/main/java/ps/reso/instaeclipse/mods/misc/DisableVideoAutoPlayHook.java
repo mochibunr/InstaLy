@@ -47,7 +47,7 @@ public class DisableVideoAutoPlayHook {
         try {
             findAndHookDynamicMethod(bridge);
         } catch (Exception e) {
-            ModuleLog.line("(InstaEclipse | AutoPlayDisable): Error: " + e.getMessage());
+            ModuleLog.line("(InstaLy | AutoPlayDisable): Error: " + e.getMessage());
         }
     }
 
@@ -61,7 +61,7 @@ public class DisableVideoAutoPlayHook {
             );
 
             if (methods.isEmpty()) {
-                ModuleLog.line("(InstaEclipse | AutoPlayDisable): ❌ No matching methods found.");
+                ModuleLog.line("(InstaLy | AutoPlayDisable): ❌ No matching methods found.");
                 return;
             }
 
@@ -76,9 +76,9 @@ public class DisableVideoAutoPlayHook {
                 }
             }
 
-            ModuleLog.line("(InstaEclipse | AutoPlayDisable): ❌ No matching methods with correct signature.");
+            ModuleLog.line("(InstaLy | AutoPlayDisable): ❌ No matching methods with correct signature.");
         } catch (Exception e) {
-            ModuleLog.line("(InstaEclipse | AutoPlayDisable): ❌ Error during method discovery: " + e.getMessage());
+            ModuleLog.line("(InstaLy | AutoPlayDisable): ❌ Error during method discovery: " + e.getMessage());
         }
     }
 
@@ -87,10 +87,10 @@ public class DisableVideoAutoPlayHook {
             Method targetMethod = method.getMethodInstance(Module.hostClassLoader);
             DexKitCache.saveMethod("AutoPlayDisable", targetMethod);
             hookMethod(targetMethod);
-            ModuleLog.line("(InstaEclipse | AutoPlayDisable): ✅ Hooked (dynamic check): " +
+            ModuleLog.line("(InstaLy | AutoPlayDisable): ✅ Hooked (dynamic check): " +
                     method.getClassName() + "." + method.getName());
         } catch (Exception e) {
-            ModuleLog.line("(InstaEclipse | AutoPlayDisable): ❌ Error hooking method: " + e.getMessage());
+            ModuleLog.line("(InstaLy | AutoPlayDisable): ❌ Error hooking method: " + e.getMessage());
         }
     }
 
@@ -114,9 +114,9 @@ public class DisableVideoAutoPlayHook {
             hookPlayDrawableLoads();
             hookPlayImageBinding();
             hookPlayOverlayClicks();
-            ModuleLog.line("(InstaEclipse | AutoPlayDisable): Hooked manual play overlay lifecycle.");
+            ModuleLog.line("(InstaLy | AutoPlayDisable): Hooked manual play overlay lifecycle.");
         } catch (Throwable t) {
-            ModuleLog.line("(InstaEclipse | AutoPlayDisable): Error hooking play overlay lifecycle: " + t.getMessage());
+            ModuleLog.line("(InstaLy | AutoPlayDisable): Error hooking play overlay lifecycle: " + t.getMessage());
         }
     }
 

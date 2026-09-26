@@ -44,11 +44,11 @@ public class ScreenshotPermissionHook {
                         }
                     });
 
-            ModuleLog.line("(InstaEclipse | ScreenshotPermission): ✅ Hooked Window.setFlags + addFlags");
+            ModuleLog.line("(InstaLy | ScreenshotPermission): ✅ Hooked Window.setFlags + addFlags");
             FeatureStatusTracker.setHooked("AllowScreenshots");
 
         } catch (Throwable e) {
-            ModuleLog.line("(InstaEclipse | ScreenshotPermission): ❌ " + e.getMessage());
+            ModuleLog.line("(InstaLy | ScreenshotPermission): ❌ " + e.getMessage());
         }
     }
 }

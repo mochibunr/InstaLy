@@ -68,7 +68,7 @@ public class DisableDoubleTapLikeHook {
             cachedReelsHooked = cachedLegacyReelsHooked || cachedGestureReelsHooked;
 
             if (cachedFeedHooked && cachedGestureReelsHooked) {
-                ModuleLog.line("(InstaEclipse | DoubleTapLike): Hooked (cached)");
+                ModuleLog.line("(InstaLy | DoubleTapLike): Hooked (cached)");
                 FeatureStatusTracker.setHooked("DisableDoubleTapLike");
                 return;
             }
@@ -76,7 +76,7 @@ public class DisableDoubleTapLikeHook {
         try {
             findAndHook(bridge, classLoader, cachedFeedHooked, cachedReelsHooked);
         } catch (Exception e) {
-            ModuleLog.line("(InstaEclipse | DoubleTapLike): " + e.getMessage());
+            ModuleLog.line("(InstaLy | DoubleTapLike): " + e.getMessage());
         }
     }
 
@@ -96,15 +96,15 @@ public class DisableDoubleTapLikeHook {
                     DexKitCache.saveMethod("DoubleTapLike", method);
                     if (hookMethod(method, HOOK)) {
                         feedHooked = true;
-                        ModuleLog.line("(InstaEclipse | DoubleTapLike): Feed hooked on " + md.getClassName() + "." + md.getMethodName());
+                        ModuleLog.line("(InstaLy | DoubleTapLike): Feed hooked on " + md.getClassName() + "." + md.getMethodName());
                         break;
                     }
                 } catch (Exception e) {
-                    ModuleLog.line("(InstaEclipse | DoubleTapLike): Feed: " + e.getMessage());
+                    ModuleLog.line("(InstaLy | DoubleTapLike): Feed: " + e.getMessage());
                 }
             }
             if (feedMethods.isEmpty()) {
-                ModuleLog.line("(InstaEclipse | DoubleTapLike): Feed method not found");
+                ModuleLog.line("(InstaLy | DoubleTapLike): Feed method not found");
             }
         }
 
@@ -112,7 +112,7 @@ public class DisableDoubleTapLikeHook {
         if (hookMethods(reelsGestureMethods, REELS_GESTURE_HOOK) > 0) {
             DexKitCache.saveMethods("DoubleTapLikeReelsGestures", reelsGestureMethods);
             reelsHooked = true;
-            ModuleLog.line("(InstaEclipse | DoubleTapLike): Reels gesture callbacks hooked: " + reelsGestureMethods.size());
+            ModuleLog.line("(InstaLy | DoubleTapLike): Reels gesture callbacks hooked: " + reelsGestureMethods.size());
         }
 
         List<ClassData> reelsClasses = bridge.findClass(FindClass.create()
@@ -133,15 +133,15 @@ public class DisableDoubleTapLikeHook {
                     if (hookMethod(method, HOOK)) {
                         DexKitCache.saveMethod("DoubleTapLikeReels", method);
                         reelsHooked = true;
-                        ModuleLog.line("(InstaEclipse | DoubleTapLike): Reels legacy hooked on " + cd.getName() + "." + md.getMethodName());
+                        ModuleLog.line("(InstaLy | DoubleTapLike): Reels legacy hooked on " + cd.getName() + "." + md.getMethodName());
                     }
                 } catch (Exception e) {
-                    ModuleLog.line("(InstaEclipse | DoubleTapLike): Reels: " + e.getMessage());
+                    ModuleLog.line("(InstaLy | DoubleTapLike): Reels: " + e.getMessage());
                 }
             }
         }
         if (!reelsHooked) {
-            ModuleLog.line("(InstaEclipse | DoubleTapLike): Reels entry not found");
+            ModuleLog.line("(InstaLy | DoubleTapLike): Reels entry not found");
         }
         if (feedHooked || reelsHooked) {
             FeatureStatusTracker.setHooked("DisableDoubleTapLike");
@@ -165,11 +165,11 @@ public class DisableDoubleTapLikeHook {
                         methods.add(method);
                     }
                 } catch (Throwable e) {
-                    ModuleLog.line("(InstaEclipse | DoubleTapLike): Reels gesture candidate skipped: " + e.getMessage());
+                    ModuleLog.line("(InstaLy | DoubleTapLike): Reels gesture candidate skipped: " + e.getMessage());
                 }
             }
         } catch (Throwable e) {
-            ModuleLog.line("(InstaEclipse | DoubleTapLike): Reels gesture search failed: " + e.getMessage());
+            ModuleLog.line("(InstaLy | DoubleTapLike): Reels gesture search failed: " + e.getMessage());
         }
         return methods;
     }
@@ -183,7 +183,7 @@ public class DisableDoubleTapLikeHook {
             XposedBridge.hookMethod(method, hook);
             return true;
         } catch (Throwable e) {
-            ModuleLog.line("(InstaEclipse | DoubleTapLike): Hook failed: " + e.getMessage());
+            ModuleLog.line("(InstaLy | DoubleTapLike): Hook failed: " + e.getMessage());
             return false;
         }
     }

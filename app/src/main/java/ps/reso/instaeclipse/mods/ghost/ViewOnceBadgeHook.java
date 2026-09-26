@@ -44,7 +44,7 @@ public class ViewOnceBadgeHook {
             Method cached = DexKitCache.loadMethod("ViewOnceBadge", classLoader);
             if (cached != null) {
                 XposedBridge.hookMethod(cached, hook);
-                ModuleLog.line("(IE|VOBadge) ✅ hooked (cached): "
+                ModuleLog.line("(InstaLy | VOBadge) ✅ hooked (cached): "
                         + cached.getDeclaringClass().getName());
                 FeatureStatusTracker.setHooked("PermanentViewMode");
                 return;
@@ -59,7 +59,7 @@ public class ViewOnceBadgeHook {
                             .name("<init>")
                             .usingStrings("once", "replayable")));
             if (methods.isEmpty()) {
-                ModuleLog.line("(IE|VOBadge) ❌ view-once props ctor not found");
+                ModuleLog.line("(InstaLy | VOBadge) ❌ view-once props ctor not found");
                 return;
             }
             // PROBE build: hook EVERY match (ctor or method). The body is gated on
@@ -72,20 +72,20 @@ public class ViewOnceBadgeHook {
                             ? md.getConstructorInstance(classLoader)
                             : md.getMethodInstance(classLoader);
                     XposedBridge.hookMethod((java.lang.reflect.Member) member, hook);
-                    ModuleLog.line("(IE|VOBadge) ✅ hooked " + md.getClassName()
+                    ModuleLog.line("(InstaLy | VOBadge) ✅ hooked " + md.getClassName()
                             + (md.isConstructor() ? ".<init>" : "." + md.getName()));
                     hooked++;
                 } catch (Throwable e) {
-                    ModuleLog.line("(IE|VOBadge) ⚠️ skip " + md.getClassName() + ": " + e);
+                    ModuleLog.line("(InstaLy | VOBadge) ⚠️ skip " + md.getClassName() + ": " + e);
                 }
             }
             if (hooked == 0) {
-                ModuleLog.line("(IE|VOBadge) ❌ props ctor found but none reflectable");
+                ModuleLog.line("(InstaLy | VOBadge) ❌ props ctor found but none reflectable");
                 return;
             }
             FeatureStatusTracker.setHooked("PermanentViewMode");
         } catch (Throwable t) {
-            ModuleLog.line("(IE|VOBadge) ❌ " + t);
+            ModuleLog.line("(InstaLy | VOBadge) ❌ " + t);
         }
     }
 
@@ -117,10 +117,10 @@ public class ViewOnceBadgeHook {
                         if (hit != null) { original = hit; break; }
                     }
                     args[modeIdx] = (original != null) ? original : "once";
-                    ModuleLog.line("(IE|VOBadge|PROBE) resolved=" + args[modeIdx]
+                    ModuleLog.line("(InstaLy | VOBadge|PROBE) resolved=" + args[modeIdx]
                             + " match=" + (original != null) + " candLongs=" + candidates);
                 } catch (Throwable t) {
-                    ModuleLog.line("(IE|VOBadge) ❌ hook body: " + t);
+                    ModuleLog.line("(InstaLy | VOBadge) ❌ hook body: " + t);
                 }
             }
         };
