@@ -51,11 +51,11 @@ public class LockDirectMessagesHook {
         try {
             XposedHelpers.findAndHookMethod("com.instagram.modal.ModalActivity",
                     classLoader, "onResume", start);
-        } catch (Throwable t) { ModuleLog.line("(IE|LockDMs) ⚠️ modal onResume: " + t.getMessage()); }
+        } catch (Throwable t) { ModuleLog.line("(InstaLy | LockDMs) ⚠️ modal onResume: " + t.getMessage()); }
         // Reflect status at startup (the gate only runs when the inbox opens, so mark it hooked
         // now when armed — otherwise the load toast shows a ❌ even though it works).
         if (FeatureFlags.lockDirectMessages) FeatureStatusTracker.setHooked("LockDirectMessages");
-        ModuleLog.line("(IE|LockDMs) ✅ installed");
+        ModuleLog.line("(InstaLy | LockDMs) ✅ installed");
     }
 
     /** Entry point usable from any activity hook (e.g. UIHookManager.setupHooks for the main tab). */
@@ -77,7 +77,7 @@ public class LockDirectMessagesHook {
         searchBarId    = r.getIdentifier("direct_inbox_action_bar", "id", pkg);
         nullStateId    = r.getIdentifier("inbox_refreshable_thread_list_recyclerview", "id", pkg);
         threadHeaderId = r.getIdentifier("direct_thread_header", "id", pkg);
-        ModuleLog.probe("(IE|LockDMs|PROBE) ids searchBar=" + searchBarId + " nullState=" + nullStateId
+        ModuleLog.probe("(InstaLy | LockDMs|PROBE) ids searchBar=" + searchBarId + " nullState=" + nullStateId
                 + " threadHeader=" + threadHeaderId);
     }
 
@@ -91,7 +91,7 @@ public class LockDirectMessagesHook {
                 showOverlay(a, true);
             }
             ensureIds(a);
-            ModuleLog.probe("(IE|LockDMs|PROBE) armed flag=" + FeatureFlags.lockDirectMessages
+            ModuleLog.probe("(InstaLy | LockDMs|PROBE) armed flag=" + FeatureFlags.lockDirectMessages
                     + " passLen=" + (FeatureFlags.lockDirectPasscode == null ? -1 : FeatureFlags.lockDirectPasscode.length())
                     + " unlocked=" + unlockedThisSession);
             final View decor = a.getWindow().getDecorView();
@@ -111,7 +111,7 @@ public class LockDirectMessagesHook {
             });
             gateIfInbox(a);
         } catch (Throwable t) {
-            ModuleLog.line("(IE|LockDMs) ⚠️ watch: " + t.getMessage());
+            ModuleLog.line("(InstaLy | LockDMs) ⚠️ watch: " + t.getMessage());
         }
     }
 
@@ -164,7 +164,7 @@ public class LockDirectMessagesHook {
         long now = System.currentTimeMillis();
         if (now - lastGateLog > 1500) {
             lastGateLog = now;
-            ModuleLog.probe("(IE|LockDMs|PROBE) gate act=" + a.getClass().getSimpleName()
+            ModuleLog.probe("(InstaLy | LockDMs|PROBE) gate act=" + a.getClass().getSimpleName()
                     + " onThread=" + onThread + " searchBar=" + sb + " nullState=" + ns);
         }
         if (!onInbox) return false;
@@ -359,7 +359,7 @@ public class LockDirectMessagesHook {
                         }
                     });
         } catch (Throwable t) {
-            ModuleLog.line("(IE|LockDMs) ⚠️ biometric: " + t.getMessage());
+            ModuleLog.line("(InstaLy | LockDMs) ⚠️ biometric: " + t.getMessage());
         }
     }
 
