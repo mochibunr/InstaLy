@@ -17,6 +17,8 @@ import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.SystemClock;
 import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
@@ -24,6 +26,7 @@ import android.view.ViewTreeObserver;
 import android.view.WindowInsets;
 import android.widget.Checkable;
 import android.widget.FrameLayout;
+import android.view.animation.OvershootInterpolator;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -107,14 +110,26 @@ public final class FloatingIosBottomNavHook {
         int originalPaddingBottom = bar.getPaddingBottom();
         int originalParentVisibility = originalParent.getVisibility();
 
+        // Locate the compact dock that used to own the native tab row BEFORE detaching the bar.
+        // Instagram 449 leaves decorative/background siblings behind, so checking childCount()==0
+        // is not enough; that is the full-width dark strip visible behind the floating capsule.
+        ViewGroup collapsedDock = findDockContainer(bar, root, activity);
+        int collapsedDockVisibility = collapsedDock != null
+                ? collapsedDock.getVisibility()
+                : View.VISIBLE;
+
         int navInset = navigationBarInset(root);
         int sideMargin = dp(activity, 12);
         int bottomMargin = navInset + dp(activity, 12);
 
         originalParent.removeView(bar);
-        boolean collapsedOriginalParent = originalParent != root && originalParent.getChildCount() == 0;
-        if (collapsedOriginalParent) {
+        boolean collapsedOriginalParent = false;
+        if (collapsedDock != null && collapsedDock != root) {
+            collapsedDock.setVisibility(View.GONE);
+        } else if (originalParent != root && originalParent.getChildCount() == 0) {
+            // Conservative fallback for older Instagram layouts.
             originalParent.setVisibility(View.GONE);
+            collapsedOriginalParent = true;
         }
 
         final int nativeBarHeight = Math.max(1, bar.getHeight());
@@ -164,7 +179,9 @@ public final class FloatingIosBottomNavHook {
                 originalPaddingEnd,
                 originalPaddingBottom,
                 originalParentVisibility,
-                collapsedOriginalParent
+                collapsedOriginalParent,
+                collapsedDock,
+                collapsedDockVisibility
         );
         STATES.put(activity, state);
         RETRIES.remove(activity);
@@ -172,7 +189,10 @@ public final class FloatingIosBottomNavHook {
         FeatureStatusTracker.setHooked(FEATURE_KEY);
         ModuleLog.line("(InstaLy | FloatingNav): applied liquid glass to "
                 + describeView(activity, bar)
-                + ", wrapperHeight=" + nativeBarHeight + "px");
+                + ", wrapperHeight=" + nativeBarHeight + "px"
+                + ", collapsedDock=" + (collapsedDock != null
+                ? describeView(activity, collapsedDock)
+                : "none"));
 
         wrapper.post(wrapper::requestCapture);
     }
@@ -223,7 +243,9 @@ public final class FloatingIosBottomNavHook {
             );
             state.bar.setLayoutParams(state.originalLayoutParams);
 
-            if (state.collapsedOriginalParent) {
+            if (state.collapsedDock != null) {
+                state.collapsedDock.setVisibility(state.collapsedDockVisibility);
+            } else if (state.collapsedOriginalParent) {
                 state.originalParent.setVisibility(state.originalParentVisibility);
             }
 
@@ -334,6 +356,47 @@ public final class FloatingIosBottomNavHook {
         return score;
     }
 
+    private static ViewGroup findDockContainer(
+            ViewGroup bar,
+            FrameLayout root,
+            Context context
+    ) {
+        int barHeight = Math.max(1, bar.getHeight());
+        int rootWidth = root.getWidth();
+        int[] rootLocation = new int[2];
+        try { root.getLocationInWindow(rootLocation); } catch (Throwable ignored) {}
+        int rootBottom = rootLocation[1] + root.getHeight();
+
+        ViewGroup best = null;
+        View current = bar.getParent() instanceof View ? (View) bar.getParent() : null;
+        int depth = 0;
+        while (current instanceof ViewGroup && current != root && depth < 5) {
+            ViewGroup group = (ViewGroup) current;
+            int h = group.getHeight();
+            int w = group.getWidth();
+            int[] location = new int[2];
+            try { group.getLocationInWindow(location); } catch (Throwable ignored) {}
+
+            int bottomGap = Math.abs(rootBottom - (location[1] + h));
+            boolean compactHeight = h > 0
+                    && h <= barHeight + dp(context, 80)
+                    && h >= Math.max(dp(context, 36), barHeight / 2);
+            boolean wideEnough = rootWidth <= 0 || w >= rootWidth * 0.70f;
+            boolean nearBottom = bottomGap <= dp(context, 200);
+
+            if (compactHeight && wideEnough && nearBottom) {
+                // Keep walking and prefer the outermost compact dock. That catches Instagram's
+                // divider/background wrapper as well as the immediate tab parent.
+                best = group;
+            }
+
+            Object parent = current.getParent();
+            current = parent instanceof View ? (View) parent : null;
+            depth++;
+        }
+        return best;
+    }
+
     private static int countInteractiveDescendants(ViewGroup group, int depth) {
         if (depth < 0) return 0;
         int count = 0;
@@ -397,6 +460,8 @@ public final class FloatingIosBottomNavHook {
         final int originalPaddingBottom;
         final int originalParentVisibility;
         final boolean collapsedOriginalParent;
+        final ViewGroup collapsedDock;
+        final int collapsedDockVisibility;
 
         State(
                 ViewGroup bar,
@@ -411,7 +476,9 @@ public final class FloatingIosBottomNavHook {
                 int originalPaddingEnd,
                 int originalPaddingBottom,
                 int originalParentVisibility,
-                boolean collapsedOriginalParent
+                boolean collapsedOriginalParent,
+                ViewGroup collapsedDock,
+                int collapsedDockVisibility
         ) {
             this.bar = bar;
             this.wrapper = wrapper;
@@ -426,6 +493,8 @@ public final class FloatingIosBottomNavHook {
             this.originalPaddingBottom = originalPaddingBottom;
             this.originalParentVisibility = originalParentVisibility;
             this.collapsedOriginalParent = collapsedOriginalParent;
+            this.collapsedDock = collapsedDock;
+            this.collapsedDockVisibility = collapsedDockVisibility;
         }
     }
 
