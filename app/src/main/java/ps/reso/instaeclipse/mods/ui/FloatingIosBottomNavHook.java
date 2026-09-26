@@ -589,6 +589,14 @@ public final class FloatingIosBottomNavHook {
         private long lensSettleUntil;
         private VelocityTracker lensVelocityTracker;
 
+        // Instagram 449 does not reliably keep isSelected()/isActivated() on tab children after
+        // a navigation switch. Keep our own visual selection state so the liquid capsule does not
+        // disappear just because Instagram rebinds/recreates its tab views.
+        private int visualSelectedTabIndex = -1;
+        private float nativeTapDownX;
+        private float nativeTapDownY;
+        private boolean nativeTapCandidate;
+
         LiquidGlassContainer(Context context, FrameLayout captureRoot, ViewGroup nativeBar) {
             super(context);
             this.captureRoot = captureRoot;
@@ -690,6 +698,47 @@ public final class FloatingIosBottomNavHook {
                 }
                 return true;
             };
+        }
+
+        @Override
+        public boolean dispatchTouchEvent(MotionEvent event) {
+            // Observe taps on Instagram's REAL tab bar without consuming them. This gives the
+            // liquid lens an authoritative target even when Instagram's selected/activated flags
+            // disappear during a tab rebind.
+            final int action = event.getActionMasked();
+            final boolean wasDraggingLens = draggingLens;
+
+            if (action == MotionEvent.ACTION_DOWN && !draggingLens) {
+                nativeTapDownX = event.getX();
+                nativeTapDownY = event.getY();
+                nativeTapCandidate = true;
+            } else if (action == MotionEvent.ACTION_MOVE && nativeTapCandidate) {
+                float dx = event.getX() - nativeTapDownX;
+                float dy = event.getY() - nativeTapDownY;
+                float slop = dp(getContext(), 10);
+                if (dx * dx + dy * dy > slop * slop) {
+                    nativeTapCandidate = false;
+                }
+            }
+
+            boolean handled = super.dispatchTouchEvent(event);
+
+            if (action == MotionEvent.ACTION_UP) {
+                if (nativeTapCandidate && !wasDraggingLens) {
+                    final float upX = event.getX();
+                    post(() -> {
+                        List<View> tabs = visibleTabs(findBestTabGroup(nativeBar));
+                        if (tabs.isEmpty()) return;
+                        int targetIndex = nearestTabIndex(tabs, upX);
+                        setVisualSelectedTab(targetIndex, true);
+                    });
+                }
+                nativeTapCandidate = false;
+            } else if (action == MotionEvent.ACTION_CANCEL) {
+                nativeTapCandidate = false;
+            }
+
+            return handled;
         }
 
         void addNativeBar(ViewGroup bar) {
@@ -819,23 +868,23 @@ public final class FloatingIosBottomNavHook {
         private void updateSelectionLens() {
             ViewGroup tabGroup = findBestTabGroup(nativeBar);
             if (tabGroup == null) {
-                hideLens();
+                // A tab switch can transiently rebuild the row. Keep the existing capsule where
+                // it is instead of flashing it off; the next pre-draw will bind to the new row.
                 return;
             }
 
-            View selected = null;
-            for (int i = 0; i < tabGroup.getChildCount(); i++) {
-                View child = tabGroup.getChildAt(i);
-                if (child.getVisibility() != View.VISIBLE) continue;
-                if (hasSelectedState(child)) {
-                    selected = child;
-                    break;
-                }
+            List<View> tabs = visibleTabs(tabGroup);
+            if (tabs.isEmpty()) return;
+
+            if (visualSelectedTabIndex < 0 || visualSelectedTabIndex >= tabs.size()) {
+                int nativeSelected = selectedTabIndex(tabs);
+                visualSelectedTabIndex = nativeSelected >= 0 ? nativeSelected : 0;
             }
-            if (selected == null) {
-                hideLens();
-                return;
-            }
+
+            View selected = tabs.get(Math.max(
+                    0,
+                    Math.min(visualSelectedTabIndex, tabs.size() - 1)
+            ));
 
             int[] selectedLocation = new int[2];
             int[] wrapperLocation = new int[2];
@@ -993,6 +1042,7 @@ public final class FloatingIosBottomNavHook {
                     }
 
                     targetIndex = Math.max(0, Math.min(tabs.size() - 1, targetIndex));
+                    visualSelectedTabIndex = targetIndex;
                     View targetTab = tabs.get(targetIndex);
                     float targetX = tabXInWrapper(targetTab);
 
@@ -1065,6 +1115,79 @@ public final class FloatingIosBottomNavHook {
                 }
             }
             return tabs;
+        }
+
+        private void setVisualSelectedTab(int index, boolean animate) {
+            List<View> tabs = visibleTabs(findBestTabGroup(nativeBar));
+            if (tabs.isEmpty()) return;
+
+            int clamped = Math.max(0, Math.min(index, tabs.size() - 1));
+            boolean changed = visualSelectedTabIndex != clamped;
+            visualSelectedTabIndex = clamped;
+            View target = tabs.get(clamped);
+            if (changed) {
+                ModuleLog.line("(InstaLy | FloatingNav): visual tab -> " + clamped);
+            }
+
+            int[] targetLocation = new int[2];
+            int[] wrapperLocation = new int[2];
+            target.getLocationInWindow(targetLocation);
+            getLocationInWindow(wrapperLocation);
+
+            float targetX = targetLocation[0] - wrapperLocation[0];
+            int top = targetLocation[1] - wrapperLocation[1];
+            int width = target.getWidth();
+            int height = target.getHeight();
+            int verticalInset = dp(getContext(), 4);
+
+            if (width <= 0 || height <= 0) return;
+
+            int lensHeight = Math.max(dp(getContext(), 42), height - verticalInset * 2);
+            FrameLayout.LayoutParams lensLp =
+                    (FrameLayout.LayoutParams) selectionLens.getLayoutParams();
+            lensLp.width = width;
+            lensLp.height = lensHeight;
+            lensLp.topMargin = Math.max(0, top + verticalInset);
+            selectionLens.setLayoutParams(lensLp);
+
+            FrameLayout.LayoutParams handleLp =
+                    (FrameLayout.LayoutParams) dragHandle.getLayoutParams();
+            handleLp.width = width;
+            handleLp.height = lensHeight;
+            handleLp.topMargin = lensLp.topMargin;
+            dragHandle.setLayoutParams(handleLp);
+
+            selectionLens.setVisibility(View.VISIBLE);
+            dragHandle.setVisibility(View.VISIBLE);
+            selectionLens.setAlpha(1f);
+            selectionLens.setSnapshot(snapshot, Math.round(targetX));
+
+            selectionLens.animate().cancel();
+            dragHandle.animate().cancel();
+
+            if (animate) {
+                lensSettleUntil = SystemClock.uptimeMillis() + 300L;
+                selectionLens.animate()
+                        .x(targetX)
+                        .alpha(1f)
+                        .scaleX(1f)
+                        .scaleY(1f)
+                        .setDuration(240L)
+                        .setInterpolator(new OvershootInterpolator(0.42f))
+                        .withEndAction(() -> {
+                            lensSettleUntil = 0L;
+                            postDelayed(this::requestCapture, 32L);
+                        })
+                        .start();
+                dragHandle.animate()
+                        .x(targetX)
+                        .setDuration(240L)
+                        .setInterpolator(new OvershootInterpolator(0.42f))
+                        .start();
+            } else {
+                selectionLens.setX(targetX);
+                dragHandle.setX(targetX);
+            }
         }
 
         private int selectedTabIndex(List<View> tabs) {
