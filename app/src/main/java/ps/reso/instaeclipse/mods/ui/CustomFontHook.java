@@ -156,13 +156,13 @@ public class CustomFontHook {
                                     android.widget.Toast.makeText(act,
                                             "Couldn't load that font file", android.widget.Toast.LENGTH_SHORT).show();
                                 }
-                            } catch (Throwable t) { ModuleLog.line("(IE|Font) result: " + t); }
+                            } catch (Throwable t) { ModuleLog.line("(InstaLy | Font) result: " + t); }
                         }
                     });
         } catch (Throwable ignored) {}
 
         if (FeatureFlags.customFontEnabled) FeatureStatusTracker.setHooked("CustomFont");
-        ModuleLog.line("(IE|Font) ✅ installed");
+        ModuleLog.line("(InstaLy | Font) ✅ installed");
     }
 
     private static Typeface getUserFont() {
@@ -174,7 +174,7 @@ public class CustomFontHook {
             userFont = Typeface.createFromFile(path);
             loadedFrom = path;
         } catch (Throwable t) {
-            ModuleLog.line("(IE|Font) load failed: " + t);
+            ModuleLog.line("(InstaLy | Font) load failed: " + t);
             userFont = null;
         } finally {
             loading.set(Boolean.FALSE);
@@ -223,7 +223,7 @@ public class CustomFontHook {
             }
             comboKey = key;
         } catch (Throwable t) {
-            ModuleLog.line("(IE|Emoji) combo build failed: " + t);
+            ModuleLog.line("(InstaLy | Emoji) combo build failed: " + t);
             combo = getUserFont();
         }
         return combo;
@@ -258,7 +258,7 @@ public class CustomFontHook {
             loadedFrom = FeatureFlags.customFontPath;
             return true;
         } catch (Throwable t) {
-            ModuleLog.line("(IE|Font) saveFont: " + t);
+            ModuleLog.line("(InstaLy | Font) saveFont: " + t);
             return false;
         }
     }
@@ -313,15 +313,15 @@ public class CustomFontHook {
                     if (!FeatureFlags.customEmojiEnabled) return;
                     try {
                         XposedHelpers.callMethod(p.args[0], "A01", new Exception("ie: emoji via fallback")); // onFailed
-                        ModuleLog.line("(IE|Emoji) EmojiCompat disabled — emoji via font fallback");
+                        ModuleLog.line("(InstaLy | Emoji) EmojiCompat disabled — emoji via font fallback");
                     } catch (Throwable ignored) {}
                     p.setResult(null);
                 }
             });
             if (FeatureFlags.customEmojiEnabled) FeatureStatusTracker.setHooked("CustomEmoji");
-            ModuleLog.line("(IE|Emoji) ✅ hook installed");
+            ModuleLog.line("(InstaLy | Emoji) ✅ hook installed");
         } catch (Throwable t) {
-            ModuleLog.line("(IE|Emoji) ⚠️ install: " + t.getMessage());
+            ModuleLog.line("(InstaLy | Emoji) ⚠️ install: " + t.getMessage());
         }
     }
 
@@ -343,7 +343,7 @@ public class CustomFontHook {
             combo = null; // force rebuild with the new emoji font
             return true;
         } catch (Throwable t) {
-            ModuleLog.line("(IE|Emoji) saveEmoji: " + t);
+            ModuleLog.line("(InstaLy | Emoji) saveEmoji: " + t);
             return false;
         }
     }
