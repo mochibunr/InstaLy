@@ -23,7 +23,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
 import android.view.ViewTreeObserver;
-import android.view.Window;
 import android.view.WindowInsets;
 import android.widget.Checkable;
 import android.widget.FrameLayout;
@@ -88,7 +87,6 @@ public final class FloatingIosBottomNavHook {
             return;
         }
         FrameLayout root = (FrameLayout) content;
-        WindowUiState originalWindowUi = captureWindowUiState(activity);
 
         ViewGroup bar = findBottomTabBar(activity, root);
         if (bar == null || bar.getParent() == null || bar.getWidth() <= 0 || bar.getHeight() <= 0) {
@@ -131,8 +129,12 @@ public final class FloatingIosBottomNavHook {
         }
 
         int navInset = navigationBarInset(root);
+        int contentBottomGap = bottomGapToDecor(activity, root);
+        boolean rootAlreadyConsumesNavInset = navInset > 0
+                && contentBottomGap >= Math.max(dp(activity, 8), navInset / 2);
         int sideMargin = dp(activity, 12);
-        int bottomMargin = navInset + dp(activity, 12);
+        int bottomMargin = dp(activity, 12)
+                + (rootAlreadyConsumesNavInset ? 0 : navInset);
 
         originalParent.removeView(bar);
         boolean collapsedOriginalParent = false;
@@ -186,14 +188,6 @@ public final class FloatingIosBottomNavHook {
         wrapper.addNativeBar(bar);
         root.addView(wrapper, wrapperLp);
 
-        // The remaining "black dock" in device screenshots is Android's navigation-bar region,
-        // not Instagram's old tab container. Let Instagram content lay out behind that region and
-        // make the system navigation bar transparent, while keeping our pill above the gesture
-        // inset via wrapperLp.bottomMargin.
-        applyBottomEdgeToEdge(activity);
-        root.requestApplyInsets();
-        root.requestLayout();
-
         State state = new State(
                 bar,
                 wrapper,
@@ -212,8 +206,7 @@ public final class FloatingIosBottomNavHook {
                 collapsedDockVisibility,
                 detachedDockParent,
                 detachedDockIndex,
-                detachedDockLayoutParams,
-                originalWindowUi
+                detachedDockLayoutParams
         );
         STATES.put(activity, state);
         RETRIES.remove(activity);
@@ -226,8 +219,10 @@ public final class FloatingIosBottomNavHook {
                 ? describeView(activity, collapsedDock)
                 : "none")
                 + ", dockRemoved=" + (detachedDockParent != null)
-                + ", edgeToEdgeBottom=true"
-                + ", navInset=" + navInset + "px");
+                + ", navInset=" + navInset + "px"
+                + ", contentBottomGap=" + contentBottomGap + "px"
+                + ", rootAlreadyInset=" + rootAlreadyConsumesNavInset
+                + ", bottomMargin=" + bottomMargin + "px");
 
         wrapper.post(wrapper::requestCapture);
     }
@@ -299,12 +294,6 @@ public final class FloatingIosBottomNavHook {
             state.originalParent.addView(state.bar, index, state.originalLayoutParams);
             state.originalParent.requestLayout();
 
-            restoreWindowUiState(activity, state.originalWindowUi);
-            View restoredContent = activity.findViewById(android.R.id.content);
-            if (restoredContent != null) {
-                restoredContent.requestApplyInsets();
-                restoredContent.requestLayout();
-            }
             ModuleLog.line("(InstaLy | FloatingNav): restored Instagram native bottom bar");
         } catch (Throwable t) {
             ModuleLog.line("(InstaLy | FloatingNav): restore failed", t);
@@ -467,73 +456,21 @@ public final class FloatingIosBottomNavHook {
         return count;
     }
 
-    private static WindowUiState captureWindowUiState(Activity activity) {
-        Window window = activity.getWindow();
-        if (window == null) return null;
-
-        View decor = window.getDecorView();
-        int systemUiVisibility = decor != null ? decor.getSystemUiVisibility() : 0;
-        int navigationBarColor = window.getNavigationBarColor();
-        int navigationBarDividerColor = Build.VERSION.SDK_INT >= 28
-                ? window.getNavigationBarDividerColor()
-                : Color.TRANSPARENT;
-        boolean navigationBarContrastEnforced = Build.VERSION.SDK_INT >= 29
-                && window.isNavigationBarContrastEnforced();
-
-        return new WindowUiState(
-                systemUiVisibility,
-                navigationBarColor,
-                navigationBarDividerColor,
-                navigationBarContrastEnforced
-        );
-    }
-
-    @SuppressWarnings("deprecation")
-    private static void applyBottomEdgeToEdge(Activity activity) {
+    private static int bottomGapToDecor(Activity activity, View view) {
         try {
-            Window window = activity.getWindow();
-            if (window == null) return;
+            View decor = activity.getWindow() != null ? activity.getWindow().getDecorView() : null;
+            if (decor == null || view == null) return 0;
 
-            View decor = window.getDecorView();
-            if (decor != null) {
-                int flags = decor.getSystemUiVisibility();
-                flags |= View.SYSTEM_UI_FLAG_LAYOUT_STABLE;
-                flags |= View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
-                decor.setSystemUiVisibility(flags);
-            }
+            int[] decorLocation = new int[2];
+            int[] viewLocation = new int[2];
+            decor.getLocationInWindow(decorLocation);
+            view.getLocationInWindow(viewLocation);
 
-            window.setNavigationBarColor(Color.TRANSPARENT);
-            if (Build.VERSION.SDK_INT >= 28) {
-                window.setNavigationBarDividerColor(Color.TRANSPARENT);
-            }
-            if (Build.VERSION.SDK_INT >= 29) {
-                window.setNavigationBarContrastEnforced(false);
-            }
-        } catch (Throwable t) {
-            ModuleLog.line("(InstaLy | FloatingNav): bottom edge-to-edge setup failed", t);
-        }
-    }
-
-    @SuppressWarnings("deprecation")
-    private static void restoreWindowUiState(Activity activity, WindowUiState state) {
-        if (state == null) return;
-        try {
-            Window window = activity.getWindow();
-            if (window == null) return;
-
-            View decor = window.getDecorView();
-            if (decor != null) {
-                decor.setSystemUiVisibility(state.systemUiVisibility);
-            }
-            window.setNavigationBarColor(state.navigationBarColor);
-            if (Build.VERSION.SDK_INT >= 28) {
-                window.setNavigationBarDividerColor(state.navigationBarDividerColor);
-            }
-            if (Build.VERSION.SDK_INT >= 29) {
-                window.setNavigationBarContrastEnforced(state.navigationBarContrastEnforced);
-            }
-        } catch (Throwable t) {
-            ModuleLog.line("(InstaLy | FloatingNav): bottom edge-to-edge restore failed", t);
+            int decorBottom = decorLocation[1] + decor.getHeight();
+            int viewBottom = viewLocation[1] + view.getHeight();
+            return Math.max(0, decorBottom - viewBottom);
+        } catch (Throwable ignored) {
+            return 0;
         }
     }
 
@@ -570,25 +507,6 @@ public final class FloatingIosBottomNavHook {
         return night != Configuration.UI_MODE_NIGHT_YES;
     }
 
-    private static final class WindowUiState {
-        final int systemUiVisibility;
-        final int navigationBarColor;
-        final int navigationBarDividerColor;
-        final boolean navigationBarContrastEnforced;
-
-        WindowUiState(
-                int systemUiVisibility,
-                int navigationBarColor,
-                int navigationBarDividerColor,
-                boolean navigationBarContrastEnforced
-        ) {
-            this.systemUiVisibility = systemUiVisibility;
-            this.navigationBarColor = navigationBarColor;
-            this.navigationBarDividerColor = navigationBarDividerColor;
-            this.navigationBarContrastEnforced = navigationBarContrastEnforced;
-        }
-    }
-
     private static final class State {
         final ViewGroup bar;
         final LiquidGlassContainer wrapper;
@@ -608,7 +526,6 @@ public final class FloatingIosBottomNavHook {
         final ViewGroup detachedDockParent;
         final int detachedDockIndex;
         final ViewGroup.LayoutParams detachedDockLayoutParams;
-        final WindowUiState originalWindowUi;
 
         State(
                 ViewGroup bar,
@@ -628,8 +545,7 @@ public final class FloatingIosBottomNavHook {
                 int collapsedDockVisibility,
                 ViewGroup detachedDockParent,
                 int detachedDockIndex,
-                ViewGroup.LayoutParams detachedDockLayoutParams,
-                WindowUiState originalWindowUi
+                ViewGroup.LayoutParams detachedDockLayoutParams
         ) {
             this.bar = bar;
             this.wrapper = wrapper;
@@ -649,7 +565,6 @@ public final class FloatingIosBottomNavHook {
             this.detachedDockParent = detachedDockParent;
             this.detachedDockIndex = detachedDockIndex;
             this.detachedDockLayoutParams = detachedDockLayoutParams;
-            this.originalWindowUi = originalWindowUi;
         }
     }
 
@@ -1009,10 +924,11 @@ public final class FloatingIosBottomNavHook {
                     selectionLens.setInteractionActive(true);
                     updateLensSurface(true);
 
-                    // Kyant: 78 / 56 = 1.3928... pressed scale.
+                    // Keep Kyant's elastic feel without letting the lens balloon over adjacent
+                    // Instagram tabs on compact phone widths.
                     selectionLens.animate()
-                            .scaleX(1.3928f)
-                            .scaleY(1.3928f)
+                            .scaleX(1.18f)
+                            .scaleY(1.18f)
                             .setDuration(110L)
                             .start();
                     return true;
@@ -1036,9 +952,9 @@ public final class FloatingIosBottomNavHook {
 
                     // A small velocity deformation mirrors Kyant's gliding/stretching lens.
                     float vx = lensVelocityTracker != null ? lensVelocityTracker.getXVelocity() : 0f;
-                    float stretch = Math.min(0.18f, Math.abs(vx) / 9000f);
-                    selectionLens.setScaleX(1.3928f * (1f + stretch));
-                    selectionLens.setScaleY(1.3928f * (1f - stretch * 0.45f));
+                    float stretch = Math.min(0.10f, Math.abs(vx) / 12000f);
+                    selectionLens.setScaleX(1.18f * (1f + stretch));
+                    selectionLens.setScaleY(1.18f * (1f - stretch * 0.35f));
                     return true;
                 }
 
@@ -1092,7 +1008,7 @@ public final class FloatingIosBottomNavHook {
                                 selectionLens.setInteractionActive(false);
                                 updateLensSurface(false);
                                 lensSettleUntil = 0L;
-                                requestCapture();
+                                postDelayed(this::requestCapture, 32L);
                             })
                             .start();
                     dragHandle.animate()
@@ -1381,18 +1297,22 @@ public final class FloatingIosBottomNavHook {
                     return 1.0 - sqrt(max(0.0, 1.0 - x * x));
                 }
 
+                float2 safeCoord(float2 p) {
+                    return clamp(p, float2(0.5), size - float2(0.5));
+                }
+
                 half4 main(float2 coord) {
                     float2 halfSize = size * 0.5;
                     float2 centered = coord - halfSize;
                     float sd = sdRoundedRect(centered, halfSize, radius);
                     if (-sd >= refractionHeight) {
-                        return content.eval(coord);
+                        return content.eval(safeCoord(coord));
                     }
                     sd = min(sd, 0.0);
                     float d = circleMap(1.0 - (-sd / refractionHeight)) * refractionAmount;
                     float gradRadius = min(radius * 1.5, min(halfSize.x, halfSize.y));
                     float2 grad = normalize(gradSdRoundedRect(centered, halfSize, gradRadius));
-                    return content.eval(coord + d * grad);
+                    return content.eval(safeCoord(coord + d * grad));
                 }
                 """;
 
@@ -1425,12 +1345,16 @@ public final class FloatingIosBottomNavHook {
                     return 1.0 - sqrt(max(0.0, 1.0 - x * x));
                 }
 
+                float2 safeCoord(float2 p) {
+                    return clamp(p, float2(0.5), size - float2(0.5));
+                }
+
                 half4 main(float2 coord) {
                     float2 halfSize = size * 0.5;
                     float2 centered = coord - halfSize;
                     float sd = sdRoundedRect(centered, halfSize, radius);
                     if (-sd >= refractionHeight) {
-                        return content.eval(coord);
+                        return content.eval(safeCoord(coord));
                     }
                     sd = min(sd, 0.0);
                     float d = circleMap(1.0 - (-sd / refractionHeight)) * refractionAmount;
@@ -1442,19 +1366,19 @@ public final class FloatingIosBottomNavHook {
                     float2 dispersed = d * grad * intensity;
 
                     half4 color = half4(0.0);
-                    half4 red = content.eval(refracted + dispersed);
+                    half4 red = content.eval(safeCoord(refracted + dispersed));
                     color.r += red.r / 3.5; color.a += red.a / 7.0;
-                    half4 orange = content.eval(refracted + dispersed * 0.6667);
+                    half4 orange = content.eval(safeCoord(refracted + dispersed * 0.6667));
                     color.r += orange.r / 3.5; color.g += orange.g / 7.0; color.a += orange.a / 7.0;
-                    half4 yellow = content.eval(refracted + dispersed * 0.3333);
+                    half4 yellow = content.eval(safeCoord(refracted + dispersed * 0.3333));
                     color.r += yellow.r / 3.5; color.g += yellow.g / 3.5; color.a += yellow.a / 7.0;
-                    half4 green = content.eval(refracted);
+                    half4 green = content.eval(safeCoord(refracted));
                     color.g += green.g / 3.5; color.a += green.a / 7.0;
-                    half4 cyan = content.eval(refracted - dispersed * 0.3333);
+                    half4 cyan = content.eval(safeCoord(refracted - dispersed * 0.3333));
                     color.g += cyan.g / 3.5; color.b += cyan.b / 3.0; color.a += cyan.a / 7.0;
-                    half4 blue = content.eval(refracted - dispersed * 0.6667);
+                    half4 blue = content.eval(safeCoord(refracted - dispersed * 0.6667));
                     color.b += blue.b / 3.0; color.a += blue.a / 7.0;
-                    half4 purple = content.eval(refracted - dispersed);
+                    half4 purple = content.eval(safeCoord(refracted - dispersed));
                     color.r += purple.r / 7.0; color.b += purple.b / 3.0; color.a += purple.a / 7.0;
                     return color;
                 }
