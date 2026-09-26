@@ -42,7 +42,7 @@ public class TerminatedExecutorGuard {
                                 // those states no new task can ever run, so dropping it is correct.
                                 if (ex != null && ex.isShutdown()) {
                                     param.setResult(null); // return void without throwing => task dropped
-                                    ModuleLog.probe("(IE|ExecGuard) dropped task rejected by shut-down executor");
+                                    ModuleLog.probe("(InstaLy | ExecGuard) dropped task rejected by shut-down executor");
                                 }
                             } catch (Throwable ignored) {
                                 // Never let the guard itself interfere with rejection handling.
@@ -50,9 +50,9 @@ public class TerminatedExecutorGuard {
                         }
                     }
             );
-            ModuleLog.line("(IE|ExecGuard) ✅ installed");
+            ModuleLog.line("(InstaLy | ExecGuard) ✅ installed");
         } catch (Throwable t) {
-            ModuleLog.line("(IE|ExecGuard) ⚠️ install failed: " + t.getMessage());
+            ModuleLog.line("(InstaLy | ExecGuard) ⚠️ install failed: " + t.getMessage());
         }
     }
 }
