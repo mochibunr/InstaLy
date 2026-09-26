@@ -528,15 +528,19 @@ public final class FloatingIosBottomNavHook {
             setClipChildren(false);
             setClipToPadding(false);
             setElevation(dp(context, 8));
-            setOutlineProvider(new ViewOutlineProvider() {
+            // Do not clip the whole wrapper: Kyant's selected lens grows beyond the 56dp row
+            // while pressed. Clip only the main backdrop itself so the pill stays rounded while
+            // the gliding lens is free to scale/stretch outside those bounds.
+            setClipToOutline(false);
+
+            backdropView = new BackdropView(context, false);
+            backdropView.setOutlineProvider(new ViewOutlineProvider() {
                 @Override
                 public void getOutline(View view, android.graphics.Outline outline) {
                     outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), radiusPx);
                 }
             });
-            setClipToOutline(true);
-
-            backdropView = new BackdropView(context, false);
+            backdropView.setClipToOutline(true);
             addView(backdropView, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
