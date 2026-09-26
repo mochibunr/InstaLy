@@ -56,7 +56,7 @@ public class CacheAutoClear {
             @Override public void onActivitySaveInstanceState(Activity a, Bundle b) {}
             @Override public void onActivityDestroyed(Activity a) {}
         });
-        ModuleLog.line("(IE|CacheAutoClear) background listener installed");
+        ModuleLog.line("(InstaLy | CacheAutoClear) background listener installed");
     }
 
     private static void onAppBackgrounded(Context app) {
@@ -78,16 +78,16 @@ public class CacheAutoClear {
                 for (File t : targets) dirTotal += dirSize(t);
                 long measured = osCache > 0 ? osCache : dirTotal;
 
-                ModuleLog.line("(IE|CacheAutoClear) backgrounded — cache=" + (measured / (1024 * 1024))
+                ModuleLog.line("(InstaLy | CacheAutoClear) backgrounded — cache=" + (measured / (1024 * 1024))
                         + "MB (limit " + limitMb + "MB)");
 
                 if (measured >= limit) {
                     long freed = 0;
                     for (File t : targets) { freed += dirSize(t); clearContents(t); }
-                    ModuleLog.line("(IE|CacheAutoClear) ✅ cleared ~" + (freed / (1024 * 1024)) + "MB");
+                    ModuleLog.line("(InstaLy | CacheAutoClear) ✅ cleared ~" + (freed / (1024 * 1024)) + "MB");
                 }
             } catch (Throwable t) {
-                ModuleLog.line("(IE|CacheAutoClear) ❌ " + t);
+                ModuleLog.line("(InstaLy | CacheAutoClear) ❌ " + t);
             }
         }, "ie-cacheclear").start();
     }
