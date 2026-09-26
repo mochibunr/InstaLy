@@ -74,20 +74,20 @@ public class FeedPhotoZoomHook {
                                 showZoomOverlay(v.getContext(), snapshot);
                                 return true;
                             } catch (Throwable t) {
-                                ModuleLog.line("(IE|PhotoZoom) ❌ long-press: " + t);
+                                ModuleLog.line("(InstaLy | PhotoZoom) ❌ long-press: " + t);
                                 return false;
                             }
                         });
                     } catch (Throwable t) {
-                        ModuleLog.line("(IE|PhotoZoom) ❌ attach hook: " + t);
+                        ModuleLog.line("(InstaLy | PhotoZoom) ❌ attach hook: " + t);
                     }
                 }
             });
 
             FeatureStatusTracker.setHooked("PhotoZoom");
-            ModuleLog.line("(IE|PhotoZoom) ✅ hook installed");
+            ModuleLog.line("(InstaLy | PhotoZoom) ✅ hook installed");
         } catch (Throwable t) {
-            ModuleLog.line("(IE|PhotoZoom) ❌ install: " + t);
+            ModuleLog.line("(InstaLy | PhotoZoom) ❌ install: " + t);
         }
     }
 
@@ -144,7 +144,7 @@ public class FeedPhotoZoomHook {
                 }
                 dialog.show();
             } catch (Throwable t) {
-                ModuleLog.line("(IE|PhotoZoom) ❌ overlay: " + t);
+                ModuleLog.line("(InstaLy | PhotoZoom) ❌ overlay: " + t);
             }
         });
     }
