@@ -172,7 +172,7 @@ public class FeedVideoDownloadHook {
         liveTreeMediaDictClass = mediaModel.liveTreeDictClass;
         carouselCandidates.clear();
         carouselCandidates.addAll(mediaModel.listCandidates);
-        ModuleLog.line("(IE|DL) media model: mutable="
+        ModuleLog.line("(InstaLy | DL) media model: mutable="
                 + (mutableMediaDictIntfClass != null) + " liveTree="
                 + (liveTreeMediaDictClass != null) + " listCandidates="
                 + carouselCandidates.size());
@@ -259,11 +259,11 @@ public class FeedVideoDownloadHook {
                                     if (media != null) {
                                         String url = bestVideoUrlFromMedia(media);
                                         if (url != null) {
-                                            ModuleLog.line("(IE|Reel) media tag hit, url=" + url);
+                                            ModuleLog.line("(InstaLy | Reel) media tag hit, url=" + url);
                                             onDownloadClicked(ctx, List.of(url), lv);
                                             return true;
                                         }
-                                        ModuleLog.line("(IE|Reel) media tag set but no video URL found in object");
+                                        ModuleLog.line("(InstaLy | Reel) media tag set but no video URL found in object");
                                     }
                                     // Fallback: filter buffer for m86 URLs only (combined stream, one per reel)
                                     List<String> all = snapshotUrlsSince(System.currentTimeMillis() - 60_000);
@@ -274,12 +274,12 @@ public class FeedVideoDownloadHook {
                                         Toast.makeText(ctx, I18n.t(ctx, R.string.ig_toast_no_reel_url_scroll), Toast.LENGTH_SHORT).show();
                                         return true;
                                     }
-                                    ModuleLog.line("(IE|Reel) buffer fallback, m86=" + m86.size() + " total=" + all.size());
+                                    ModuleLog.line("(InstaLy | Reel) buffer fallback, m86=" + m86.size() + " total=" + all.size());
                                     // Take only the most recent URL (first in deque = newest)
                                     onDownloadClicked(ctx, List.of(pick.get(0)), lv);
                                     return true;
                                 });
-                                ModuleLog.line("(IE|Reel) long-press hook set on like_button");
+                                ModuleLog.line("(InstaLy | Reel) long-press hook set on like_button");
                             }
                         }
                     });
@@ -342,7 +342,7 @@ public class FeedVideoDownloadHook {
                 parent.addView(btn);
                 btn.bringToFront();
             } catch (Exception e) {
-                ModuleLog.line("(IE|DL) Cannot inject download button: " + e.getMessage());
+                ModuleLog.line("(InstaLy | DL) Cannot inject download button: " + e.getMessage());
             }
         });
     }
@@ -361,7 +361,7 @@ public class FeedVideoDownloadHook {
     private List<String> resolveUrls(View likeBtn, View downloadBtn) {
         // Tier-1a: like button's listener (works for standard feed posts)
         List<String> urls = urlsFromSaveBtnListener(likeBtn);
-        ModuleLog.line("(IE|DL) Tier-1a urls=" + urls.size());
+        ModuleLog.line("(InstaLy | DL) Tier-1a urls=" + urls.size());
         if (!urls.isEmpty()) return urls;
 
         // Tier-1b: bookmark/save button's listener.
@@ -377,9 +377,9 @@ public class FeedVideoDownloadHook {
             for (int i = 0; i < 4 && p instanceof ViewGroup vg; i++, p = vg.getParent()) {
                 View realSaveBtn = vg.findViewById(saveResId);
                 if (realSaveBtn != null) {
-                    ModuleLog.line("(IE|DL) Tier-1b found save btn at parent level " + i);
+                    ModuleLog.line("(InstaLy | DL) Tier-1b found save btn at parent level " + i);
                     urls = urlsFromSaveBtnListener(realSaveBtn);
-                    ModuleLog.line("(IE|DL) Tier-1b urls=" + urls.size());
+                    ModuleLog.line("(InstaLy | DL) Tier-1b urls=" + urls.size());
                     if (!urls.isEmpty()) return urls;
                     break; // found the button but listener had no URLs — no point going wider
                 }
@@ -422,7 +422,7 @@ public class FeedVideoDownloadHook {
                     //       that isn't exposed as a Java field until DIS() is called)
                     String videoUrl = findVideoUrlInObject(media,
                             Collections.newSetFromMap(new IdentityHashMap<>()), 0);
-                    ModuleLog.line("(IE|DL) stepA1 videoUrl=" + (videoUrl != null
+                    ModuleLog.line("(InstaLy | DL) stepA1 videoUrl=" + (videoUrl != null
                             ? videoUrl.substring(0, Math.min(80, videoUrl.length())) : "null"));
 
                     if (videoUrl == null
@@ -452,7 +452,7 @@ public class FeedVideoDownloadHook {
                                 } catch (Throwable ignored) {}
                             }
                         }
-                        ModuleLog.line("(IE|DL) stepA2 videoUrl=" + (videoUrl != null
+                        ModuleLog.line("(InstaLy | DL) stepA2 videoUrl=" + (videoUrl != null
                                 ? videoUrl.substring(0, Math.min(80, videoUrl.length())) : "null"));
                     }
                     if (videoUrl != null) return List.of(videoUrl);
@@ -463,7 +463,7 @@ public class FeedVideoDownloadHook {
                     if ((mutableMediaDictIntfClass != null || liveTreeMediaDictClass != null)
                             && !carouselCandidates.isEmpty()) {
                         Object dictIntf = findMediaDictionary(media);
-                        ModuleLog.line("(IE|DL) dictIntf=" + (dictIntf != null
+                        ModuleLog.line("(InstaLy | DL) dictIntf=" + (dictIntf != null
                                 ? dictIntf.getClass().getName() : "null"));
 
                         if (dictIntf != null) {
@@ -475,7 +475,7 @@ public class FeedVideoDownloadHook {
                                     if (videoVersionIntfClass != null && !items.isEmpty()
                                             && videoVersionIntfClass.isInstance(items.get(0))) continue;
 
-                                    ModuleLog.line("(IE|Car) candidate=" + candidate.getName()
+                                    ModuleLog.line("(InstaLy | Car) candidate=" + candidate.getName()
                                             + " items=" + items.size());
                                     List<String> carouselUrls = new ArrayList<>();
 
@@ -494,7 +494,7 @@ public class FeedVideoDownloadHook {
                                             try {
                                                 Object r = methodImageUrl.invoke(null, saveBtn.getContext(), item);
                                                 if (r instanceof String s && isCdnMediaUrl(s)) {
-                                                    ModuleLog.line("(IE|Car) item[" + idx + "] mediaExtKt=" + s.substring(0, Math.min(60, s.length())));
+                                                    ModuleLog.line("(InstaLy | Car) item[" + idx + "] mediaExtKt=" + s.substring(0, Math.min(60, s.length())));
                                                     carouselUrls.add(s);
                                                     continue;
                                                 }
@@ -503,7 +503,7 @@ public class FeedVideoDownloadHook {
 
                                         // 3. Probe all no-param String methods (Pando JNI nodes: LX/VPC, LX/5q9)
                                         String probed = probeCdnUrlViaStringMethods(item);
-                                        ModuleLog.line("(IE|Car) item[" + idx + "] probed=" + probed);
+                                        ModuleLog.line("(InstaLy | Car) item[" + idx + "] probed=" + probed);
                                         if (probed != null) { carouselUrls.add(probed); continue; }
 
                                         // 4. Generic CDN field scan as last resort
@@ -513,7 +513,7 @@ public class FeedVideoDownloadHook {
                                         if (!scanned.isEmpty()) carouselUrls.add(pickBestImageUrl(scanned));
                                     }
 
-                                    ModuleLog.line("(IE|Car) carouselUrls=" + carouselUrls.size());
+                                    ModuleLog.line("(InstaLy | Car) carouselUrls=" + carouselUrls.size());
                                     if (carouselUrls.size() >= 2) return carouselUrls;
                                 } catch (Throwable ignored) {}
                             }
@@ -1088,7 +1088,7 @@ public class FeedVideoDownloadHook {
             List<Method> cached = DexKitCache.loadMethods("VideoUrlCapture", classLoader);
             if (cached != null && !cached.isEmpty()) {
                 for (Method m : cached) XposedBridge.hookMethod(m, urlHook);
-                ModuleLog.line("(IE|DL|DexKit) VideoUrlCapture: " + cached.size() + " method(s) from cache");
+                ModuleLog.line("(InstaLy | DL|DexKit) VideoUrlCapture: " + cached.size() + " method(s) from cache");
                 resolveUsernameGetter(bridge, classLoader);
                 return;
             }
@@ -1100,7 +1100,7 @@ public class FeedVideoDownloadHook {
                             .addInterface("com.instagram.model.mediasize.VideoVersionIntf",
                                     StringMatchType.Equals, false)));
 
-            ModuleLog.line("(IE|DL|DexKit) VideoVersionIntf implementors found: " + classes.size());
+            ModuleLog.line("(InstaLy | DL|DexKit) VideoVersionIntf implementors found: " + classes.size());
 
             List<Method> hooked = new ArrayList<>();
             for (ClassData classData : classes) {
@@ -1116,22 +1116,22 @@ public class FeedVideoDownloadHook {
                         try {
                             Method m = methodData.getMethodInstance(classLoader);
                             XposedBridge.hookMethod(m, urlHook);
-                            ModuleLog.line("(IE|DL|DexKit) ✅ Hooked getUrl() on "
+                            ModuleLog.line("(InstaLy | DL|DexKit) ✅ Hooked getUrl() on "
                                     + classData.getName());
                             hooked.add(m);
                         } catch (Throwable e) {
-                            ModuleLog.line("(IE|DL|DexKit) ❌ Hook failed for "
+                            ModuleLog.line("(InstaLy | DL|DexKit) ❌ Hook failed for "
                                     + classData.getName() + ": " + e.getMessage());
                         }
                     }
                 } catch (Throwable e) {
-                    ModuleLog.line("(IE|DL|DexKit) ❌ findMethod failed for "
+                    ModuleLog.line("(InstaLy | DL|DexKit) ❌ findMethod failed for "
                             + classData.getName() + ": " + e.getMessage());
                 }
             }
             if (!hooked.isEmpty()) DexKitCache.saveMethods("VideoUrlCapture", hooked);
         } catch (Throwable e) {
-            ModuleLog.line("(IE|DL|DexKit) ❌ installVideoUrlCaptureHook: " + e.getMessage());
+            ModuleLog.line("(InstaLy | DL|DexKit) ❌ installVideoUrlCaptureHook: " + e.getMessage());
         }
 
         resolveUsernameGetter(bridge, classLoader);
@@ -1174,10 +1174,10 @@ public class FeedVideoDownloadHook {
             liveTreeMediaDictClass = mediaModel.liveTreeDictClass;
             carouselCandidates.clear();
             carouselCandidates.addAll(mediaModel.listCandidates);
-            ModuleLog.line("(IE|DL|DexKit) dynamic media dict="
+            ModuleLog.line("(InstaLy | DL|DexKit) dynamic media dict="
                     + (liveTreeMediaDictClass == null ? "not found" : liveTreeMediaDictClass.getName()));
         } catch (Throwable t) {
-            ModuleLog.line("(IE|DL|DexKit) dynamic media model resolution failed: " + t);
+            ModuleLog.line("(InstaLy | DL|DexKit) dynamic media model resolution failed: " + t);
         }
     }
 
@@ -1230,10 +1230,10 @@ public class FeedVideoDownloadHook {
             for (Method getter : resolvedVideoVersionsGetters) {
                 if (!carouselCandidates.contains(getter)) carouselCandidates.add(getter);
             }
-            ModuleLog.line("(IE|DL|DexKit) video_versions getters="
+            ModuleLog.line("(InstaLy | DL|DexKit) video_versions getters="
                     + resolvedVideoVersionsGetters.size());
         } catch (Throwable t) {
-            ModuleLog.line("(IE|DL|DexKit) video_versions getter resolution failed: " + t);
+            ModuleLog.line("(InstaLy | DL|DexKit) video_versions getter resolution failed: " + t);
         }
     }
 
@@ -1275,11 +1275,11 @@ public class FeedVideoDownloadHook {
             if (carouselMediaGetter != null && !carouselCandidates.contains(carouselMediaGetter)) {
                 carouselCandidates.add(0, carouselMediaGetter);
             }
-            ModuleLog.line("(IE|DL|DexKit) carousel getter="
+            ModuleLog.line("(InstaLy | DL|DexKit) carousel getter="
                     + (carouselMediaGetter == null ? "not found"
                        : carouselMediaGetter.getDeclaringClass().getName() + "." + carouselMediaGetter.getName()));
         } catch (Throwable t) {
-            ModuleLog.line("(IE|DL|DexKit) carousel getter resolution failed: " + t);
+            ModuleLog.line("(InstaLy | DL|DexKit) carousel getter resolution failed: " + t);
         }
     }
 
@@ -1311,10 +1311,10 @@ public class FeedVideoDownloadHook {
                     if (resolvedIsVideoMethod != null) break;
                 }
             }
-            ModuleLog.line("(IE|DL|DexKit) isVideo="
+            ModuleLog.line("(InstaLy | DL|DexKit) isVideo="
                     + (resolvedIsVideoMethod == null ? "not found" : resolvedIsVideoMethod.getName()));
         } catch (Throwable t) {
-            ModuleLog.line("(IE|DL|DexKit) isVideo resolution failed: " + t);
+            ModuleLog.line("(InstaLy | DL|DexKit) isVideo resolution failed: " + t);
         }
     }
 
@@ -1349,13 +1349,13 @@ public class FeedVideoDownloadHook {
                             .usingStrings("username_missing_during_update")));
 
             if (userMethods.isEmpty()) {
-                ModuleLog.line("(IE|DL|Username) ❌ username_missing_during_update not found");
+                ModuleLog.line("(InstaLy | DL|Username) ❌ username_missing_during_update not found");
                 return;
             }
 
             userClass = userMethods.get(0).getMethodInstance(classLoader).getDeclaringClass();
             DexKitCache.saveString("UserClass", userClass.getName());
-            ModuleLog.line("(IE|DL|Username) userClass=" + userClass.getName());
+            ModuleLog.line("(InstaLy | DL|Username) userClass=" + userClass.getName());
 
             // Resolve the username getter on User via the stable GraphQL field ID -265713450
             // (== "username".hashCode(), a JDK-fixed constant → valid across builds).
@@ -1396,20 +1396,20 @@ public class FeedVideoDownloadHook {
                     UserUtils.userUsernameGetter = chosen.getMethodInstance(classLoader);
                     UserUtils.userUsernameGetter.setAccessible(true);
                     DexKitCache.saveMethod("UsernameGetter", UserUtils.userUsernameGetter);
-                    ModuleLog.line("(IE|DL|Username) userUsernameGetter=" + UserUtils.userUsernameGetter.getName()
+                    ModuleLog.line("(InstaLy | DL|Username) userUsernameGetter=" + UserUtils.userUsernameGetter.getName()
                             + " (excluded " + readsFullName.size() + " full_name getter(s))");
                 } else {
-                    ModuleLog.line("(IE|DL|Username) ❌ userUsernameGetter not found via -265713450");
+                    ModuleLog.line("(InstaLy | DL|Username) ❌ userUsernameGetter not found via -265713450");
                 }
             } catch (Throwable t) {
-                ModuleLog.line("(IE|DL|Username) ❌ userUsernameGetter resolution: " + t);
+                ModuleLog.line("(InstaLy | DL|Username) ❌ userUsernameGetter resolution: " + t);
             }
 
             resolveDictUserGetter(bridge, classLoader);
             resolveMediaAuthorGetter(bridge, classLoader);
 
         } catch (Throwable t) {
-            ModuleLog.line("(IE|DL|Username) ❌ resolveUsernameGetter: " + t);
+            ModuleLog.line("(InstaLy | DL|Username) ❌ resolveUsernameGetter: " + t);
         }
     }
 
@@ -1441,12 +1441,12 @@ public class FeedVideoDownloadHook {
                 m.setAccessible(true);
                 mediaAuthorGetter = m;
                 DexKitCache.saveMethod("MediaAuthorGetter", m);
-                ModuleLog.line("(IE|DL|Username) ✅ mediaAuthorGetter (Media.\"user\"): " + m.getName());
+                ModuleLog.line("(InstaLy | DL|Username) ✅ mediaAuthorGetter (Media.\"user\"): " + m.getName());
             } else {
-                ModuleLog.line("(IE|DL|Username) mediaAuthorGetter: no Media \"user\" getter (older build)");
+                ModuleLog.line("(InstaLy | DL|Username) mediaAuthorGetter: no Media \"user\" getter (older build)");
             }
         } catch (Throwable t) {
-            ModuleLog.line("(IE|DL|Username) ❌ mediaAuthorGetter: " + t);
+            ModuleLog.line("(InstaLy | DL|Username) ❌ mediaAuthorGetter: " + t);
         }
     }
 
@@ -1479,7 +1479,7 @@ public class FeedVideoDownloadHook {
                     m.setAccessible(true);
                     dictUserGetter = m;
                     DexKitCache.saveMethod("DictUserGetter", m);
-                    ModuleLog.line("(IE|DL|Username) ✅ Resolved dictUserGetter: " + m.getName());
+                    ModuleLog.line("(InstaLy | DL|Username) ✅ Resolved dictUserGetter: " + m.getName());
                     return;
                 }
             }
@@ -1510,15 +1510,15 @@ public class FeedVideoDownloadHook {
                     m.setAccessible(true);
                     dictUserGetter = m;
                     DexKitCache.saveMethod("DictUserGetter", m);
-                    ModuleLog.line("(IE|DL|Username) ✅ Resolved dictUserGetter (concrete class): " + m.getName());
+                    ModuleLog.line("(InstaLy | DL|Username) ✅ Resolved dictUserGetter (concrete class): " + m.getName());
                     return;
                 }
             } catch (Throwable t) {
-                ModuleLog.line("(IE|DL|Username) ❌ dictUserGetter DexKit lookup: " + t);
+                ModuleLog.line("(InstaLy | DL|Username) ❌ dictUserGetter DexKit lookup: " + t);
             }
         }
 
-        ModuleLog.line("(IE|DL|Username) ❌ Failed to resolve dictUserGetter in hierarchy");
+        ModuleLog.line("(InstaLy | DL|Username) ❌ Failed to resolve dictUserGetter in hierarchy");
     }
 
     // ── Download dispatch ─────────────────────────────────────────────────────
@@ -1860,7 +1860,7 @@ public class FeedVideoDownloadHook {
             String responseType = downloadToFileAndGetType(url, temp);
             MediaTypeDetector.Result detected = MediaTypeDetector.resolve(
                     temp, responseType, isVideo ? "video/mp4" : "image/jpeg", filename);
-            ModuleLog.line("(IE|DL|Type) requested=" + (isVideo ? "video" : "image")
+            ModuleLog.line("(InstaLy | DL|Type) requested=" + (isVideo ? "video" : "image")
                     + " response=" + responseType + " detected=" + detected.kind
                     + " file=" + detected.filename);
             saveFileToDestination(ctx, temp, detected.filename, detected.isVideo(), username);
@@ -1892,7 +1892,7 @@ public class FeedVideoDownloadHook {
         intent.putExtra("mimeType", isVideo ? "video/mp4" : "image/jpeg");
         intent.putExtra("username", username);
         ctx.startForegroundService(intent);
-        ModuleLog.line("(IE|DL) Delegated to DownloadSaveService: " + filename);
+        ModuleLog.line("(InstaLy | DL) Delegated to DownloadSaveService: " + filename);
     }
 
     /**
@@ -1938,7 +1938,7 @@ public class FeedVideoDownloadHook {
         String videoUrl = bestVideoUrlFromMedia(media);
         if (videoUrl != null) return new ArrayList<>(List.of(videoUrl));
 
-        ModuleLog.line("(IE|Post|DEBUG) carousel check: mutableMediaDictIntfClass=" +
+        ModuleLog.line("(InstaLy | Post|DEBUG) carousel check: mutableMediaDictIntfClass=" +
                 (mutableMediaDictIntfClass == null ? "null" : mutableMediaDictIntfClass.getName()) +
                 " carouselCandidates=" + carouselCandidates.size());
 
@@ -1946,14 +1946,14 @@ public class FeedVideoDownloadHook {
         if ((mutableMediaDictIntfClass != null || liveTreeMediaDictClass != null)
                 && !carouselCandidates.isEmpty()) {
             Object dictIntf = findMediaDictionary(media);
-            ModuleLog.line("(IE|Post|DEBUG) dictIntf=" +
+            ModuleLog.line("(InstaLy | Post|DEBUG) dictIntf=" +
                     (dictIntf == null ? "null" : dictIntf.getClass().getName()));
             if (dictIntf != null) {
                 for (Method candidate : carouselCandidates) {
                     try {
                         Object listObj = candidate.invoke(dictIntf);
                         int sz = (listObj instanceof List<?> l) ? l.size() : -1;
-                        ModuleLog.line("(IE|Post|DEBUG)   candidate=" + candidate.getName() +
+                        ModuleLog.line("(InstaLy | Post|DEBUG)   candidate=" + candidate.getName() +
                                 " resultType=" + (listObj == null ? "null" : listObj.getClass().getName()) +
                                 " size=" + sz);
                         if (!(listObj instanceof List<?> items) || items.size() < 2) continue;
@@ -1997,7 +1997,7 @@ public class FeedVideoDownloadHook {
                     return new ArrayList<>(List.of(candidate));
                 }
             }
-            ModuleLog.line("(IE|Post|DL) media is video but no video URL was resolved; "
+            ModuleLog.line("(InstaLy | Post|DL) media is video but no video URL was resolved; "
                     + "refusing image cover fallback");
             return new ArrayList<>();
         }
@@ -2047,7 +2047,7 @@ public class FeedVideoDownloadHook {
             }
             return urls;
         } catch (Throwable t) {
-            ModuleLog.line("(IE|Post) extractCarouselUrls: " + t);
+            ModuleLog.line("(InstaLy | Post) extractCarouselUrls: " + t);
             return null;
         }
     }
@@ -2078,7 +2078,7 @@ public class FeedVideoDownloadHook {
                                 Toast.LENGTH_SHORT).show());
                     }
                 } catch (Throwable e) {
-                    ModuleLog.line("(IE|Post|DL) single failed: " + e);
+                    ModuleLog.line("(InstaLy | Post|DL) single failed: " + e);
                     mainHandler.post(() -> Toast.makeText(ctx,
                             I18n.t(ctx, R.string.ig_toast_download_failed, e.getMessage()), Toast.LENGTH_SHORT).show());
                 }
@@ -2223,7 +2223,7 @@ public class FeedVideoDownloadHook {
                             downloadAndSave(ctx, url, fn, isVid, username);
                         } catch (Throwable e) {
                             failed++;
-                            ModuleLog.line("(IE|Post|DL) item failed: " + e);
+                            ModuleLog.line("(InstaLy | Post|DL) item failed: " + e);
                         }
                     }
                     final int finalFailed = failed;
@@ -2256,7 +2256,7 @@ public class FeedVideoDownloadHook {
             dialog.show();
 
         } catch (Throwable t) {
-            ModuleLog.line("(IE|Post) ❌ showCarouselBottomSheet: " + t);
+            ModuleLog.line("(InstaLy | Post) ❌ showCarouselBottomSheet: " + t);
         }
     }
 
@@ -2281,7 +2281,7 @@ public class FeedVideoDownloadHook {
                 cb.setPrimaryClip(ClipData.newPlainText("InstaLy", url));
                 Toast.makeText(ctx, I18n.t(ctx, R.string.ig_copy_link_copied), Toast.LENGTH_SHORT).show();
             } catch (Throwable t) {
-                ModuleLog.line("(IE|Post) ❌ copyLinkToClipboard: " + t);
+                ModuleLog.line("(InstaLy | Post) ❌ copyLinkToClipboard: " + t);
             }
         }, 350);
     }
@@ -2383,7 +2383,7 @@ public class FeedVideoDownloadHook {
                         cb.setPrimaryClip(ClipData.newPlainText("InstaLy", allText));
                         Toast.makeText(ctx, I18n.t(ctx, R.string.ig_copy_link_copied_all, n), Toast.LENGTH_SHORT).show();
                     } catch (Throwable t) {
-                        ModuleLog.line("(IE|Post) ❌ copy all links: " + t);
+                        ModuleLog.line("(InstaLy | Post) ❌ copy all links: " + t);
                     }
                 }, 350);
             });
@@ -2404,7 +2404,7 @@ public class FeedVideoDownloadHook {
             dialog.show();
 
         } catch (Throwable t) {
-            ModuleLog.line("(IE|Post) ❌ showCopyLinkSheet: " + t);
+            ModuleLog.line("(InstaLy | Post) ❌ showCopyLinkSheet: " + t);
         }
     }
 
@@ -2487,19 +2487,19 @@ public class FeedVideoDownloadHook {
     private void onDownloadClicked(Context ctx, List<String> urls, View saveBtn) {
         currentDownloadUsername = getUsernameFromView(saveBtn);
         currentDownloadMediaId  = getMediaIdFromView(saveBtn);
-        ModuleLog.line("(IE|DL) onDownloadClicked username=" + currentDownloadUsername + " mediaId=" + currentDownloadMediaId);
+        ModuleLog.line("(InstaLy | DL) onDownloadClicked username=" + currentDownloadUsername + " mediaId=" + currentDownloadMediaId);
         List<String> videos = new ArrayList<>();
         List<String> images = new ArrayList<>();
         for (String url : urls) {
             if (isVideoUrl(url)) videos.add(url);
             else                 images.add(url);
         }
-        ModuleLog.line("(IE|DL) total=" + urls.size()
+        ModuleLog.line("(InstaLy | DL) total=" + urls.size()
                 + " videos=" + videos.size() + " images=" + images.size());
         for (int i = 0; i < videos.size(); i++)
-            ModuleLog.line("(IE|DL) video[" + i + "]=" + videos.get(i));
+            ModuleLog.line("(InstaLy | DL) video[" + i + "]=" + videos.get(i));
         for (int i = 0; i < images.size(); i++)
-            ModuleLog.line("(IE|DL) image[" + i + "]=" + images.get(i));
+            ModuleLog.line("(InstaLy | DL) image[" + i + "]=" + images.get(i));
 
         if (!videos.isEmpty() && !images.isEmpty()) {
             handleMixedContent(ctx, urls, videos, images, saveBtn);
@@ -2517,7 +2517,7 @@ public class FeedVideoDownloadHook {
         executor.submit(() -> {
             String videoUrl = videos.get(0);
             TrackInfo t = probeUrl(videoUrl);
-            ModuleLog.line("(IE|DL) probeUrl=" + videoUrl
+            ModuleLog.line("(InstaLy | DL) probeUrl=" + videoUrl
                     + " hasVideo=" + t.hasVideo + " hasAudio=" + t.hasAudio);
             mainHandler.post(() -> {
                 if (!t.hasVideo && t.hasAudio) {
@@ -2594,7 +2594,7 @@ public class FeedVideoDownloadHook {
 
     private void startDirectDownload(Context ctx, String url, boolean isVideo) {
         String fn = buildFilename(currentDownloadUsername, "post", currentDownloadMediaId, isVideo);
-        ModuleLog.line("(IE|DL) startDirectDownload file=" + fn);
+        ModuleLog.line("(InstaLy | DL) startDirectDownload file=" + fn);
         Toast.makeText(ctx, isVideo ? I18n.t(ctx, R.string.ig_toast_downloading_video) : I18n.t(ctx, R.string.ig_toast_downloading_photo), Toast.LENGTH_SHORT).show();
         executor.submit(() -> {
             try {
@@ -2605,7 +2605,7 @@ public class FeedVideoDownloadHook {
                             Toast.LENGTH_SHORT).show());
                 }
             } catch (Throwable e) {
-                ModuleLog.line("(IE|DL) download failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
+                ModuleLog.line("(InstaLy | DL) download failed: " + e.getClass().getSimpleName() + ": " + e.getMessage());
                 mainHandler.post(() -> Toast.makeText(ctx,
                         I18n.t(ctx, R.string.ig_toast_download_failed, e.getMessage()), Toast.LENGTH_SHORT).show());
             }
@@ -2625,7 +2625,7 @@ public class FeedVideoDownloadHook {
                 try {
                     delegateUrlToCompanionApp(ctx, videoUrl, audioUrl, fn, true, currentDownloadUsername);
                 } catch (Throwable e) {
-                    ModuleLog.line("(IE|DL) merge delegate failed: " + e.getMessage());
+                    ModuleLog.line("(InstaLy | DL) merge delegate failed: " + e.getMessage());
                     mainHandler.post(() -> startDirectDownload(ctx, videoUrl, true));
                 }
                 return;
