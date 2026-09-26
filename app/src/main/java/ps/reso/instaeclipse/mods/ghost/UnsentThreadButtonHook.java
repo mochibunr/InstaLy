@@ -51,10 +51,10 @@ public class UnsentThreadButtonHook {
             try {
                 XposedHelpers.findAndHookMethod(act, classLoader, "onResume", resume);
             } catch (Throwable t) {
-                ModuleLog.line("(IE|UnsentBtn) ⚠️ hook " + act + ": " + t.getMessage());
+                ModuleLog.line("(InstaLy | UnsentBtn) ⚠️ hook " + act + ": " + t.getMessage());
             }
         }
-        ModuleLog.line("(IE|UnsentBtn) ✅ installed");
+        ModuleLog.line("(InstaLy | UnsentBtn) ✅ installed");
     }
 
     @SuppressLint("DiscouragedApi")
@@ -125,7 +125,7 @@ public class UnsentThreadButtonHook {
                 }
             });
         } catch (Throwable t) {
-            ModuleLog.line("(IE|UnsentBtn) ⚠️ register: " + t.getMessage());
+            ModuleLog.line("(InstaLy | UnsentBtn) ⚠️ register: " + t.getMessage());
         }
     }
 
@@ -190,15 +190,15 @@ public class UnsentThreadButtonHook {
                 if (threadId == null) threadId = bound[0];
                 if (threadId == null) threadId = KeepUnsentMessagesHook.currentThreadId;
                 if (threadId == null) threadId = resolveThreadId(headerRoot);
-                ModuleLog.line("(IE|UnsentBtn) open thread=" + threadId);
+                ModuleLog.line("(InstaLy | UnsentBtn) open thread=" + threadId);
                 ps.reso.instaeclipse.utils.dialog.DialogUtils.showThreadUnsent(activity, threadId, threadTitle(activity));
             });
             try { target.addView(btn, Math.min(insertAt, target.getChildCount())); }
             catch (Throwable t) { target.addView(btn); }
-            ModuleLog.line("(IE|UnsentBtn) ✅ injected next to back in " + target.getClass().getSimpleName());
+            ModuleLog.line("(InstaLy | UnsentBtn) ✅ injected next to back in " + target.getClass().getSimpleName());
             return true;
         } catch (Throwable t) {
-            ModuleLog.line("(IE|UnsentBtn) ⚠️ inject: " + t.getMessage());
+            ModuleLog.line("(InstaLy | UnsentBtn) ⚠️ inject: " + t.getMessage());
             return false;
         }
     }
@@ -275,7 +275,7 @@ public class UnsentThreadButtonHook {
                 if (tagKeyId != 0) {
                     Object t = v.getTag(tagKeyId);
                     if (t != null) {
-                        ModuleLog.line("(IE|UnsentBtn|PROBE) tagKey on " + v.getClass().getSimpleName()
+                        ModuleLog.line("(InstaLy | UnsentBtn|PROBE) tagKey on " + v.getClass().getSimpleName()
                                 + " = " + t.getClass().getName());
                         String id = threadIdFromAny(t);
                         if (id != null && found == null) found = id;
