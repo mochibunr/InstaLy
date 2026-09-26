@@ -123,7 +123,7 @@ public final class IgColorRemapEngine {
             buildTable(context);
             built = true;
             int size = (rgbTable != null ? rgbTable.size() : 0) + (exactTable != null ? exactTable.size() : 0);
-            ModuleLog.line("(InstaEclipse | Theme): color remap table size=" + size);
+            ModuleLog.line("(InstaLy | Theme): color remap table size=" + size);
         }
     }
 
