@@ -114,9 +114,19 @@ public final class FloatingIosBottomNavHook {
         // Instagram 449 leaves decorative/background siblings behind, so checking childCount()==0
         // is not enough; that is the full-width dark strip visible behind the floating capsule.
         ViewGroup collapsedDock = findDockContainer(bar, root, activity);
+        ViewGroup detachedDockParent = null;
+        int detachedDockIndex = -1;
+        ViewGroup.LayoutParams detachedDockLayoutParams = null;
         int collapsedDockVisibility = collapsedDock != null
                 ? collapsedDock.getVisibility()
                 : View.VISIBLE;
+
+        if (collapsedDock != null && collapsedDock != root
+                && collapsedDock.getParent() instanceof ViewGroup) {
+            detachedDockParent = (ViewGroup) collapsedDock.getParent();
+            detachedDockIndex = detachedDockParent.indexOfChild(collapsedDock);
+            detachedDockLayoutParams = collapsedDock.getLayoutParams();
+        }
 
         int navInset = navigationBarInset(root);
         int sideMargin = dp(activity, 12);
@@ -124,12 +134,20 @@ public final class FloatingIosBottomNavHook {
 
         originalParent.removeView(bar);
         boolean collapsedOriginalParent = false;
-        if (collapsedDock != null && collapsedDock != root) {
-            collapsedDock.setVisibility(View.GONE);
+        if (collapsedDock != null && detachedDockParent != null) {
+            // WAEnhancer's important trick: remove the ENTIRE native dock from its old layout,
+            // not just the tab row. This removes Instagram's reserved bottom-navigation slot and
+            // its divider/background helpers, allowing the feed/content host to lay out through
+            // the space behind our floating pill.
+            detachedDockParent.removeView(collapsedDock);
+            detachedDockParent.requestLayout();
+            root.requestLayout();
         } else if (originalParent != root && originalParent.getChildCount() == 0) {
-            // Conservative fallback for older Instagram layouts.
+            // Conservative fallback for layouts where no outer dock can be identified.
             originalParent.setVisibility(View.GONE);
             collapsedOriginalParent = true;
+            originalParent.requestLayout();
+            root.requestLayout();
         }
 
         final int nativeBarHeight = Math.max(1, bar.getHeight());
@@ -181,7 +199,10 @@ public final class FloatingIosBottomNavHook {
                 originalParentVisibility,
                 collapsedOriginalParent,
                 collapsedDock,
-                collapsedDockVisibility
+                collapsedDockVisibility,
+                detachedDockParent,
+                detachedDockIndex,
+                detachedDockLayoutParams
         );
         STATES.put(activity, state);
         RETRIES.remove(activity);
@@ -190,9 +211,10 @@ public final class FloatingIosBottomNavHook {
         ModuleLog.line("(InstaLy | FloatingNav): applied liquid glass to "
                 + describeView(activity, bar)
                 + ", wrapperHeight=" + nativeBarHeight + "px"
-                + ", collapsedDock=" + (collapsedDock != null
+                + ", detachedDock=" + (collapsedDock != null
                 ? describeView(activity, collapsedDock)
-                : "none"));
+                : "none")
+                + ", dockRemoved=" + (detachedDockParent != null));
 
         wrapper.post(wrapper::requestCapture);
     }
@@ -243,14 +265,26 @@ public final class FloatingIosBottomNavHook {
             );
             state.bar.setLayoutParams(state.originalLayoutParams);
 
-            if (state.collapsedDock != null) {
+            if (state.detachedDockParent != null && state.collapsedDock != null
+                    && state.collapsedDock.getParent() == null) {
                 state.collapsedDock.setVisibility(state.collapsedDockVisibility);
+                int dockIndex = Math.max(
+                        0,
+                        Math.min(state.detachedDockIndex, state.detachedDockParent.getChildCount())
+                );
+                state.detachedDockParent.addView(
+                        state.collapsedDock,
+                        dockIndex,
+                        state.detachedDockLayoutParams
+                );
+                state.detachedDockParent.requestLayout();
             } else if (state.collapsedOriginalParent) {
                 state.originalParent.setVisibility(state.originalParentVisibility);
             }
 
             int index = Math.max(0, Math.min(state.originalIndex, state.originalParent.getChildCount()));
             state.originalParent.addView(state.bar, index, state.originalLayoutParams);
+            state.originalParent.requestLayout();
             ModuleLog.line("(InstaLy | FloatingNav): restored Instagram native bottom bar");
         } catch (Throwable t) {
             ModuleLog.line("(InstaLy | FloatingNav): restore failed", t);
@@ -462,6 +496,9 @@ public final class FloatingIosBottomNavHook {
         final boolean collapsedOriginalParent;
         final ViewGroup collapsedDock;
         final int collapsedDockVisibility;
+        final ViewGroup detachedDockParent;
+        final int detachedDockIndex;
+        final ViewGroup.LayoutParams detachedDockLayoutParams;
 
         State(
                 ViewGroup bar,
@@ -478,7 +515,10 @@ public final class FloatingIosBottomNavHook {
                 int originalParentVisibility,
                 boolean collapsedOriginalParent,
                 ViewGroup collapsedDock,
-                int collapsedDockVisibility
+                int collapsedDockVisibility,
+                ViewGroup detachedDockParent,
+                int detachedDockIndex,
+                ViewGroup.LayoutParams detachedDockLayoutParams
         ) {
             this.bar = bar;
             this.wrapper = wrapper;
@@ -495,6 +535,9 @@ public final class FloatingIosBottomNavHook {
             this.collapsedOriginalParent = collapsedOriginalParent;
             this.collapsedDock = collapsedDock;
             this.collapsedDockVisibility = collapsedDockVisibility;
+            this.detachedDockParent = detachedDockParent;
+            this.detachedDockIndex = detachedDockIndex;
+            this.detachedDockLayoutParams = detachedDockLayoutParams;
         }
     }
 
@@ -560,7 +603,8 @@ public final class FloatingIosBottomNavHook {
             selectionLens = new BackdropView(context, true);
             selectionLens.setVisibility(View.INVISIBLE);
             selectionLens.setAlpha(0f);
-            selectionLens.setElevation(dp(context, 3));
+            selectionLens.setElevation(0f);
+            selectionLens.setTranslationZ(0f);
             selectionLens.setOutlineProvider(new ViewOutlineProvider() {
                 @Override
                 public void getOutline(View view, android.graphics.Outline outline) {
@@ -575,7 +619,7 @@ public final class FloatingIosBottomNavHook {
             // opaque, so a background tint would disappear underneath it.
             lensSurfaceDrawable = new GradientDrawable();
             lensSurfaceDrawable.setCornerRadius(dp(context, 32));
-            lensSurfaceDrawable.setColor(isLightTheme(context) ? 0x1A000000 : 0x1AFFFFFF);
+            lensSurfaceDrawable.setColor(isLightTheme(context) ? 0x14000000 : 0x18FFFFFF);
             lensSurfaceDrawable.setStroke(
                     dp(context, 1),
                     isLightTheme(context) ? 0x26000000 : 0x4DFFFFFF
@@ -631,7 +675,11 @@ public final class FloatingIosBottomNavHook {
                     Gravity.CENTER
             );
             addView(bar, lp);
-            // Keep native icons above the glass lens, but keep the transparent drag handle on top.
+            // Android elevation/Z can override insertion order. Keep Instagram's real icons,
+            // avatar and badges above the liquid lens, with only the transparent gesture handle
+            // above the native bar.
+            bar.setTranslationZ(dp(getContext(), 4));
+            dragHandle.setTranslationZ(dp(getContext(), 8));
             dragHandle.bringToFront();
         }
 
@@ -1314,7 +1362,7 @@ public final class FloatingIosBottomNavHook {
             // Kyant's selected capsule has no strong lens at rest. Refraction/chromatic
             // aberration ramps in while pressed/dragging.
             if (selectionLens && !interactionActive) {
-                view.setRenderEffect(null);
+                Api31Effects.applyBlurAndVibrancy(view, blurRadius);
                 return;
             }
 
