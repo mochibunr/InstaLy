@@ -17,6 +17,8 @@ import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
 import android.os.SystemClock;
 import android.view.Gravity;
+import android.view.MotionEvent;
+import android.view.VelocityTracker;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
@@ -24,6 +26,7 @@ import android.view.ViewTreeObserver;
 import android.view.WindowInsets;
 import android.widget.Checkable;
 import android.widget.FrameLayout;
+import android.view.animation.OvershootInterpolator;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -107,14 +110,26 @@ public final class FloatingIosBottomNavHook {
         int originalPaddingBottom = bar.getPaddingBottom();
         int originalParentVisibility = originalParent.getVisibility();
 
+        // Locate the compact dock that used to own the native tab row BEFORE detaching the bar.
+        // Instagram 449 leaves decorative/background siblings behind, so checking childCount()==0
+        // is not enough; that is the full-width dark strip visible behind the floating capsule.
+        ViewGroup collapsedDock = findDockContainer(bar, root, activity);
+        int collapsedDockVisibility = collapsedDock != null
+                ? collapsedDock.getVisibility()
+                : View.VISIBLE;
+
         int navInset = navigationBarInset(root);
         int sideMargin = dp(activity, 12);
         int bottomMargin = navInset + dp(activity, 12);
 
         originalParent.removeView(bar);
-        boolean collapsedOriginalParent = originalParent != root && originalParent.getChildCount() == 0;
-        if (collapsedOriginalParent) {
+        boolean collapsedOriginalParent = false;
+        if (collapsedDock != null && collapsedDock != root) {
+            collapsedDock.setVisibility(View.GONE);
+        } else if (originalParent != root && originalParent.getChildCount() == 0) {
+            // Conservative fallback for older Instagram layouts.
             originalParent.setVisibility(View.GONE);
+            collapsedOriginalParent = true;
         }
 
         final int nativeBarHeight = Math.max(1, bar.getHeight());
@@ -164,7 +179,9 @@ public final class FloatingIosBottomNavHook {
                 originalPaddingEnd,
                 originalPaddingBottom,
                 originalParentVisibility,
-                collapsedOriginalParent
+                collapsedOriginalParent,
+                collapsedDock,
+                collapsedDockVisibility
         );
         STATES.put(activity, state);
         RETRIES.remove(activity);
@@ -172,7 +189,10 @@ public final class FloatingIosBottomNavHook {
         FeatureStatusTracker.setHooked(FEATURE_KEY);
         ModuleLog.line("(InstaLy | FloatingNav): applied liquid glass to "
                 + describeView(activity, bar)
-                + ", wrapperHeight=" + nativeBarHeight + "px");
+                + ", wrapperHeight=" + nativeBarHeight + "px"
+                + ", collapsedDock=" + (collapsedDock != null
+                ? describeView(activity, collapsedDock)
+                : "none"));
 
         wrapper.post(wrapper::requestCapture);
     }
@@ -223,7 +243,9 @@ public final class FloatingIosBottomNavHook {
             );
             state.bar.setLayoutParams(state.originalLayoutParams);
 
-            if (state.collapsedOriginalParent) {
+            if (state.collapsedDock != null) {
+                state.collapsedDock.setVisibility(state.collapsedDockVisibility);
+            } else if (state.collapsedOriginalParent) {
                 state.originalParent.setVisibility(state.originalParentVisibility);
             }
 
@@ -334,6 +356,47 @@ public final class FloatingIosBottomNavHook {
         return score;
     }
 
+    private static ViewGroup findDockContainer(
+            ViewGroup bar,
+            FrameLayout root,
+            Context context
+    ) {
+        int barHeight = Math.max(1, bar.getHeight());
+        int rootWidth = root.getWidth();
+        int[] rootLocation = new int[2];
+        try { root.getLocationInWindow(rootLocation); } catch (Throwable ignored) {}
+        int rootBottom = rootLocation[1] + root.getHeight();
+
+        ViewGroup best = null;
+        View current = bar.getParent() instanceof View ? (View) bar.getParent() : null;
+        int depth = 0;
+        while (current instanceof ViewGroup && current != root && depth < 5) {
+            ViewGroup group = (ViewGroup) current;
+            int h = group.getHeight();
+            int w = group.getWidth();
+            int[] location = new int[2];
+            try { group.getLocationInWindow(location); } catch (Throwable ignored) {}
+
+            int bottomGap = Math.abs(rootBottom - (location[1] + h));
+            boolean compactHeight = h > 0
+                    && h <= barHeight + dp(context, 80)
+                    && h >= Math.max(dp(context, 36), barHeight / 2);
+            boolean wideEnough = rootWidth <= 0 || w >= rootWidth * 0.70f;
+            boolean nearBottom = bottomGap <= dp(context, 200);
+
+            if (compactHeight && wideEnough && nearBottom) {
+                // Keep walking and prefer the outermost compact dock. That catches Instagram's
+                // divider/background wrapper as well as the immediate tab parent.
+                best = group;
+            }
+
+            Object parent = current.getParent();
+            current = parent instanceof View ? (View) parent : null;
+            depth++;
+        }
+        return best;
+    }
+
     private static int countInteractiveDescendants(ViewGroup group, int depth) {
         if (depth < 0) return 0;
         int count = 0;
@@ -397,6 +460,8 @@ public final class FloatingIosBottomNavHook {
         final int originalPaddingBottom;
         final int originalParentVisibility;
         final boolean collapsedOriginalParent;
+        final ViewGroup collapsedDock;
+        final int collapsedDockVisibility;
 
         State(
                 ViewGroup bar,
@@ -411,7 +476,9 @@ public final class FloatingIosBottomNavHook {
                 int originalPaddingEnd,
                 int originalPaddingBottom,
                 int originalParentVisibility,
-                boolean collapsedOriginalParent
+                boolean collapsedOriginalParent,
+                ViewGroup collapsedDock,
+                int collapsedDockVisibility
         ) {
             this.bar = bar;
             this.wrapper = wrapper;
@@ -426,6 +493,8 @@ public final class FloatingIosBottomNavHook {
             this.originalPaddingBottom = originalPaddingBottom;
             this.originalParentVisibility = originalParentVisibility;
             this.collapsedOriginalParent = collapsedOriginalParent;
+            this.collapsedDock = collapsedDock;
+            this.collapsedDockVisibility = collapsedDockVisibility;
         }
     }
 
@@ -435,6 +504,8 @@ public final class FloatingIosBottomNavHook {
         private final BackdropView backdropView;
         private final View surfaceTint;
         private final BackdropView selectionLens;
+        private final View dragHandle;
+        private final GradientDrawable lensSurfaceDrawable;
         private final float radiusPx;
         private final ViewTreeObserver.OnPreDrawListener preDrawListener;
 
@@ -442,6 +513,11 @@ public final class FloatingIosBottomNavHook {
         private long lastCaptureAt;
         private long lastSelectionAt;
         private boolean listenerAttached;
+        private boolean draggingLens;
+        private float dragStartRawX;
+        private float dragStartLensX;
+        private long lensSettleUntil;
+        private VelocityTracker lensVelocityTracker;
 
         LiquidGlassContainer(Context context, FrameLayout captureRoot, ViewGroup nativeBar) {
             super(context);
@@ -452,15 +528,19 @@ public final class FloatingIosBottomNavHook {
             setClipChildren(false);
             setClipToPadding(false);
             setElevation(dp(context, 8));
-            setOutlineProvider(new ViewOutlineProvider() {
+            // Do not clip the whole wrapper: Kyant's selected lens grows beyond the 56dp row
+            // while pressed. Clip only the main backdrop itself so the pill stays rounded while
+            // the gliding lens is free to scale/stretch outside those bounds.
+            setClipToOutline(false);
+
+            backdropView = new BackdropView(context, false);
+            backdropView.setOutlineProvider(new ViewOutlineProvider() {
                 @Override
                 public void getOutline(View view, android.graphics.Outline outline) {
                     outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), radiusPx);
                 }
             });
-            setClipToOutline(true);
-
-            backdropView = new BackdropView(context, false);
+            backdropView.setClipToOutline(true);
             addView(backdropView, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
@@ -488,12 +568,30 @@ public final class FloatingIosBottomNavHook {
                 }
             });
             selectionLens.setClipToOutline(true);
-            GradientDrawable lensStroke = new GradientDrawable();
-            lensStroke.setColor(Color.TRANSPARENT);
-            lensStroke.setCornerRadius(dp(context, 32));
-            lensStroke.setStroke(dp(context, 1), isLightTheme(context) ? 0x26000000 : 0x38FFFFFF);
-            selectionLens.setForeground(lensStroke);
+
+            // Kyant's LiquidBottomTabs uses a very light selected surface at rest (10% black in
+            // light mode / 10% white in dark mode), then fades toward a ~3% black surface while
+            // actively dragging. Keeping this as FOREGROUND is important: the sampled backdrop is
+            // opaque, so a background tint would disappear underneath it.
+            lensSurfaceDrawable = new GradientDrawable();
+            lensSurfaceDrawable.setCornerRadius(dp(context, 32));
+            lensSurfaceDrawable.setColor(isLightTheme(context) ? 0x1A000000 : 0x1AFFFFFF);
+            lensSurfaceDrawable.setStroke(
+                    dp(context, 1),
+                    isLightTheme(context) ? 0x26000000 : 0x4DFFFFFF
+            );
+            selectionLens.setForeground(lensSurfaceDrawable);
             addView(selectionLens, new FrameLayout.LayoutParams(1, 1));
+
+            // The visual lens stays BEHIND Instagram's real tab icons. A transparent handle sits
+            // above the native bar and mirrors the lens bounds so dragging never hides/replaces
+            // Instagram's own icon, badge, accessibility or selected-state rendering.
+            dragHandle = new View(context);
+            dragHandle.setVisibility(View.INVISIBLE);
+            dragHandle.setBackgroundColor(Color.TRANSPARENT);
+            dragHandle.setClickable(true);
+            dragHandle.setOnTouchListener((v, event) -> handleLensTouch(event));
+            addView(dragHandle, new FrameLayout.LayoutParams(1, 1));
 
             GradientDrawable border = new GradientDrawable();
             border.setColor(Color.TRANSPARENT);
@@ -533,6 +631,8 @@ public final class FloatingIosBottomNavHook {
                     Gravity.CENTER
             );
             addView(bar, lp);
+            // Keep native icons above the glass lens, but keep the transparent drag handle on top.
+            dragHandle.bringToFront();
         }
 
         @Override
@@ -555,6 +655,10 @@ public final class FloatingIosBottomNavHook {
             }
             backdropView.setSnapshot(null, 0);
             selectionLens.setSnapshot(null, 0);
+            if (lensVelocityTracker != null) {
+                lensVelocityTracker.recycle();
+                lensVelocityTracker = null;
+            }
         }
 
         void requestCapture() {
@@ -674,29 +778,272 @@ public final class FloatingIosBottomNavHook {
                 return;
             }
 
-            FrameLayout.LayoutParams lp = (FrameLayout.LayoutParams) selectionLens.getLayoutParams();
-            lp.width = width;
-            lp.height = Math.max(dp(getContext(), 42), height - verticalInset * 2);
-            lp.leftMargin = 0;
-            lp.topMargin = Math.max(0, top + verticalInset);
-            selectionLens.setLayoutParams(lp);
+            int lensHeight = Math.max(dp(getContext(), 42), height - verticalInset * 2);
+
+            FrameLayout.LayoutParams lensLp = (FrameLayout.LayoutParams) selectionLens.getLayoutParams();
+            lensLp.width = width;
+            lensLp.height = lensHeight;
+            lensLp.leftMargin = 0;
+            lensLp.topMargin = Math.max(0, top + verticalInset);
+            selectionLens.setLayoutParams(lensLp);
+
+            FrameLayout.LayoutParams handleLp = (FrameLayout.LayoutParams) dragHandle.getLayoutParams();
+            handleLp.width = width;
+            handleLp.height = lensHeight;
+            handleLp.leftMargin = 0;
+            handleLp.topMargin = lensLp.topMargin;
+            dragHandle.setLayoutParams(handleLp);
+
+            // While the user is dragging (or while the release spring is settling), never fight
+            // the finger/spring by snapping back to Instagram's selected state every pre-draw.
+            long now = SystemClock.uptimeMillis();
+            if (draggingLens || now < lensSettleUntil) {
+                selectionLens.setSnapshot(snapshot, Math.round(selectionLens.getX()));
+                return;
+            }
+
             selectionLens.setSnapshot(snapshot, left);
 
             if (selectionLens.getVisibility() != View.VISIBLE) {
                 selectionLens.setX(left);
+                dragHandle.setX(left);
                 selectionLens.setAlpha(0f);
                 selectionLens.setVisibility(View.VISIBLE);
+                dragHandle.setVisibility(View.VISIBLE);
                 selectionLens.animate().alpha(1f).setDuration(150L).start();
-            } else {
+            } else if (Math.abs(selectionLens.getX() - left) > 1f) {
                 selectionLens.animate()
                         .x(left)
                         .alpha(1f)
-                        .setDuration(180L)
+                        .setDuration(220L)
+                        .setInterpolator(new OvershootInterpolator(0.35f))
                         .start();
+                dragHandle.animate()
+                        .x(left)
+                        .setDuration(220L)
+                        .setInterpolator(new OvershootInterpolator(0.35f))
+                        .start();
+            } else {
+                dragHandle.setX(left);
+                dragHandle.setVisibility(View.VISIBLE);
             }
         }
 
+        private boolean handleLensTouch(MotionEvent event) {
+            if (selectionLens.getVisibility() != View.VISIBLE) return false;
+
+            switch (event.getActionMasked()) {
+                case MotionEvent.ACTION_DOWN: {
+                    draggingLens = true;
+                    lensSettleUntil = 0L;
+                    selectionLens.animate().cancel();
+                    dragHandle.animate().cancel();
+
+                    dragStartRawX = event.getRawX();
+                    dragStartLensX = selectionLens.getX();
+
+                    if (lensVelocityTracker != null) lensVelocityTracker.recycle();
+                    lensVelocityTracker = VelocityTracker.obtain();
+                    lensVelocityTracker.addMovement(event);
+
+                    selectionLens.setInteractionActive(true);
+                    updateLensSurface(true);
+
+                    // Kyant: 78 / 56 = 1.3928... pressed scale.
+                    selectionLens.animate()
+                            .scaleX(1.3928f)
+                            .scaleY(1.3928f)
+                            .setDuration(110L)
+                            .start();
+                    return true;
+                }
+
+                case MotionEvent.ACTION_MOVE: {
+                    if (!draggingLens) return false;
+                    if (lensVelocityTracker != null) {
+                        lensVelocityTracker.addMovement(event);
+                        lensVelocityTracker.computeCurrentVelocity(1000);
+                    }
+
+                    float rawTarget = dragStartLensX + (event.getRawX() - dragStartRawX);
+                    float minX = 0f;
+                    float maxX = Math.max(0f, getWidth() - selectionLens.getWidth());
+                    float targetX = Math.max(minX, Math.min(maxX, rawTarget));
+
+                    selectionLens.setX(targetX);
+                    dragHandle.setX(targetX);
+                    selectionLens.setSnapshot(snapshot, Math.round(targetX));
+
+                    // A small velocity deformation mirrors Kyant's gliding/stretching lens.
+                    float vx = lensVelocityTracker != null ? lensVelocityTracker.getXVelocity() : 0f;
+                    float stretch = Math.min(0.18f, Math.abs(vx) / 9000f);
+                    selectionLens.setScaleX(1.3928f * (1f + stretch));
+                    selectionLens.setScaleY(1.3928f * (1f - stretch * 0.45f));
+                    return true;
+                }
+
+                case MotionEvent.ACTION_UP:
+                case MotionEvent.ACTION_CANCEL: {
+                    if (!draggingLens) return false;
+                    draggingLens = false;
+
+                    float vx = 0f;
+                    if (lensVelocityTracker != null) {
+                        lensVelocityTracker.addMovement(event);
+                        lensVelocityTracker.computeCurrentVelocity(1000);
+                        vx = lensVelocityTracker.getXVelocity();
+                        lensVelocityTracker.recycle();
+                        lensVelocityTracker = null;
+                    }
+
+                    List<View> tabs = visibleTabs(findBestTabGroup(nativeBar));
+                    if (tabs.isEmpty()) {
+                        finishLensInteraction(selectionLens.getX());
+                        return true;
+                    }
+
+                    float projectedCenter = selectionLens.getX()
+                            + selectionLens.getWidth() / 2f
+                            + vx * 0.085f;
+
+                    int targetIndex;
+                    if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
+                        targetIndex = selectedTabIndex(tabs);
+                        if (targetIndex < 0) {
+                            targetIndex = nearestTabIndex(tabs, projectedCenter);
+                        }
+                    } else {
+                        targetIndex = nearestTabIndex(tabs, projectedCenter);
+                    }
+
+                    targetIndex = Math.max(0, Math.min(tabs.size() - 1, targetIndex));
+                    View targetTab = tabs.get(targetIndex);
+                    float targetX = tabXInWrapper(targetTab);
+
+                    // Keep the "pressed glass" shader alive until the spring reaches its tab.
+                    lensSettleUntil = SystemClock.uptimeMillis() + 420L;
+                    selectionLens.animate()
+                            .x(targetX)
+                            .scaleX(1f)
+                            .scaleY(1f)
+                            .setDuration(310L)
+                            .setInterpolator(new OvershootInterpolator(0.62f))
+                            .withEndAction(() -> {
+                                selectionLens.setInteractionActive(false);
+                                updateLensSurface(false);
+                                lensSettleUntil = 0L;
+                                requestCapture();
+                            })
+                            .start();
+                    dragHandle.animate()
+                            .x(targetX)
+                            .setDuration(310L)
+                            .setInterpolator(new OvershootInterpolator(0.62f))
+                            .start();
+
+                    if (event.getActionMasked() != MotionEvent.ACTION_CANCEL) {
+                        performRealTabClick(targetTab);
+                    }
+                    return true;
+                }
+
+                default:
+                    return draggingLens;
+            }
+        }
+
+        private void finishLensInteraction(float x) {
+            lensSettleUntil = SystemClock.uptimeMillis() + 220L;
+            selectionLens.animate()
+                    .x(x)
+                    .scaleX(1f)
+                    .scaleY(1f)
+                    .setDuration(180L)
+                    .withEndAction(() -> {
+                        selectionLens.setInteractionActive(false);
+                        updateLensSurface(false);
+                        lensSettleUntil = 0L;
+                    })
+                    .start();
+        }
+
+        private void updateLensSurface(boolean pressed) {
+            int fill = pressed
+                    ? 0x08000000
+                    : (isLightTheme(getContext()) ? 0x1A000000 : 0x1AFFFFFF);
+            int stroke = pressed
+                    ? (isLightTheme(getContext()) ? 0x40000000 : 0x66FFFFFF)
+                    : (isLightTheme(getContext()) ? 0x26000000 : 0x4DFFFFFF);
+            lensSurfaceDrawable.setColor(fill);
+            lensSurfaceDrawable.setStroke(dp(getContext(), 1), stroke);
+            selectionLens.invalidate();
+        }
+
+        private List<View> visibleTabs(ViewGroup tabGroup) {
+            List<View> tabs = new ArrayList<>();
+            if (tabGroup == null) return tabs;
+            for (int i = 0; i < tabGroup.getChildCount(); i++) {
+                View child = tabGroup.getChildAt(i);
+                if (child.getVisibility() == View.VISIBLE && child.getWidth() > 0) {
+                    tabs.add(child);
+                }
+            }
+            return tabs;
+        }
+
+        private int selectedTabIndex(List<View> tabs) {
+            for (int i = 0; i < tabs.size(); i++) {
+                if (hasSelectedState(tabs.get(i))) return i;
+            }
+            return -1;
+        }
+
+        private int nearestTabIndex(List<View> tabs, float xCenter) {
+            int best = 0;
+            float bestDistance = Float.MAX_VALUE;
+            for (int i = 0; i < tabs.size(); i++) {
+                View tab = tabs.get(i);
+                float center = tabXInWrapper(tab) + tab.getWidth() / 2f;
+                float distance = Math.abs(center - xCenter);
+                if (distance < bestDistance) {
+                    bestDistance = distance;
+                    best = i;
+                }
+            }
+            return best;
+        }
+
+        private float tabXInWrapper(View tab) {
+            int[] tabLocation = new int[2];
+            int[] wrapperLocation = new int[2];
+            tab.getLocationInWindow(tabLocation);
+            getLocationInWindow(wrapperLocation);
+            return tabLocation[0] - wrapperLocation[0];
+        }
+
+        private void performRealTabClick(View tab) {
+            try {
+                if (tab.performClick()) return;
+                View clickable = findClickableDescendant(tab);
+                if (clickable != null) clickable.performClick();
+            } catch (Throwable t) {
+                ModuleLog.line("(InstaLy | FloatingNav): native tab click failed", t);
+            }
+        }
+
+        private View findClickableDescendant(View view) {
+            if (view != null && view.isClickable()) return view;
+            if (!(view instanceof ViewGroup)) return null;
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                View hit = findClickableDescendant(group.getChildAt(i));
+                if (hit != null) return hit;
+            }
+            return null;
+        }
+
         private void hideLens() {
+            dragHandle.setVisibility(View.INVISIBLE);
             if (selectionLens.getVisibility() == View.VISIBLE) {
                 selectionLens.animate().alpha(0f).setDuration(120L).withEndAction(() ->
                         selectionLens.setVisibility(View.INVISIBLE)
@@ -766,6 +1113,7 @@ public final class FloatingIosBottomNavHook {
         private int sampleOffsetX;
         private int configuredWidth = -1;
         private int configuredHeight = -1;
+        private boolean interactionActive;
 
         BackdropView(Context context, boolean selectionLens) {
             super(context);
@@ -776,6 +1124,17 @@ public final class FloatingIosBottomNavHook {
         void setSnapshot(Bitmap bitmap, int sampleOffsetX) {
             this.snapshot = bitmap;
             this.sampleOffsetX = sampleOffsetX;
+            invalidate();
+        }
+
+        void setInteractionActive(boolean active) {
+            if (interactionActive == active) return;
+            interactionActive = active;
+            configuredWidth = -1;
+            configuredHeight = -1;
+            if (getWidth() > 0 && getHeight() > 0) {
+                configureEffect(getWidth(), getHeight());
+            }
             invalidate();
         }
 
@@ -800,7 +1159,8 @@ public final class FloatingIosBottomNavHook {
 
             try {
                 if (Build.VERSION.SDK_INT >= 33) {
-                    Api33Effects.applyLiquidGlass(this, width, height, selectionLens);
+                    Api33Effects.applyLiquidGlass(
+                            this, width, height, selectionLens, interactionActive);
                 } else if (Build.VERSION.SDK_INT >= 31) {
                     Api31Effects.applyBlurAndVibrancy(this, dp(getContext(), 8));
                 }
@@ -940,10 +1300,24 @@ public final class FloatingIosBottomNavHook {
                 }
                 """;
 
-        static void applyLiquidGlass(View view, int width, int height, boolean selectionLens) {
+        static void applyLiquidGlass(
+                View view,
+                int width,
+                int height,
+                boolean selectionLens,
+                boolean interactionActive
+        ) {
             float density = view.getResources().getDisplayMetrics().density;
             float blurRadius = 8f * density;
             float radius = selectionLens ? height / 2f : Math.min(30f * density, height / 2f);
+
+            // Kyant's selected capsule has no strong lens at rest. Refraction/chromatic
+            // aberration ramps in while pressed/dragging.
+            if (selectionLens && !interactionActive) {
+                view.setRenderEffect(null);
+                return;
+            }
+
             float refractionHeight = (selectionLens ? 10f : 24f) * density;
             float refractionAmount = (selectionLens ? 14f : 24f) * density;
 
