@@ -76,9 +76,9 @@ public class HideChatsHook {
                 catch (Throwable ignored) {}
             }
             if (n > 0) FeatureStatusTracker.setHooked("HideSpecificChats");
-            ModuleLog.line("(IE|HideChats) inbox filter hooked " + n + " method(s)");
+            ModuleLog.line("(InstaLy | HideChats) inbox filter hooked " + n + " method(s)");
         } catch (Throwable t) {
-            ModuleLog.line("(IE|HideChats) ⚠️ inbox filter: " + t.getMessage());
+            ModuleLog.line("(InstaLy | HideChats) ⚠️ inbox filter: " + t.getMessage());
         }
     }
 
@@ -113,9 +113,9 @@ public class HideChatsHook {
         for (String act : new String[]{"com.instagram.modal.ModalActivity",
                 "com.instagram.mainactivity.InstagramMainActivity"}) {
             try { XposedHelpers.findAndHookMethod(act, classLoader, "onResume", resume); }
-            catch (Throwable t) { ModuleLog.line("(IE|HideChats) ⚠️ hook " + act + ": " + t.getMessage()); }
+            catch (Throwable t) { ModuleLog.line("(InstaLy | HideChats) ⚠️ hook " + act + ": " + t.getMessage()); }
         }
-        ModuleLog.line("(IE|HideChats) ✅ installed");
+        ModuleLog.line("(InstaLy | HideChats) ✅ installed");
     }
 
     @SuppressLint("DiscouragedApi")
@@ -188,13 +188,13 @@ public class HideChatsHook {
                 Toast.makeText(activity,
                         I18n(activity, nowHidden ? R.string.ig_hide_chat_hidden : R.string.ig_hide_chat_unhidden),
                         Toast.LENGTH_SHORT).show();
-                ModuleLog.line("(IE|HideChats) toggled thread=" + threadId + " hidden=" + nowHidden);
+                ModuleLog.line("(InstaLy | HideChats) toggled thread=" + threadId + " hidden=" + nowHidden);
             });
             try { target.addView(btn, Math.min(insertAt, target.getChildCount())); }
             catch (Throwable t) { target.addView(btn); }
             return true;
         } catch (Throwable t) {
-            ModuleLog.line("(IE|HideChats) ⚠️ inject: " + t.getMessage());
+            ModuleLog.line("(InstaLy | HideChats) ⚠️ inject: " + t.getMessage());
             return false;
         }
     }
@@ -246,7 +246,7 @@ public class HideChatsHook {
                         String key = k == null ? "" : k.toLowerCase(java.util.Locale.ROOT);
                         if (!raw.isEmpty() && key.contains("thread")
                                 && (key.contains("id") || key.contains("igid") || key.contains("key"))) {
-                            ModuleLog.probe("(IE|HideChats) thread id from intent extra " + k);
+                            ModuleLog.probe("(InstaLy | HideChats) thread id from intent extra " + k);
                             return raw;
                         }
                     }
@@ -275,11 +275,11 @@ public class HideChatsHook {
             // "couldn't identify this chat" when the UI object graph changes.
             String tracked = KeepUnsentMessagesHook.currentThreadId;
             if (tracked != null && !tracked.isEmpty()) {
-                ModuleLog.probe("(IE|HideChats) thread id from current-thread tracker");
+                ModuleLog.probe("(InstaLy | HideChats) thread id from current-thread tracker");
                 return tracked;
             }
         } catch (Throwable t) {
-            ModuleLog.probe("(IE|HideChats) resolveThreadId failed: " + t);
+            ModuleLog.probe("(InstaLy | HideChats) resolveThreadId failed: " + t);
         }
         return null;
     }
