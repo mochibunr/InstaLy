@@ -133,6 +133,39 @@ public final class FloatingIosBottomNavHook {
                         }
                     }
             );
+
+            // Do not replace Instagram's OnClickListener/OnTouchListener. Observe the framework's
+            // real performClick() after it runs, then move only our visual liquid selector.
+            XposedHelpers.findAndHookMethod(
+                    View.class,
+                    "performClick",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (!FeatureFlags.floatingIosBottomNavbar || sTabBarId == 0) return;
+
+                            View clicked = (View) param.thisObject;
+                            View directTab = findDirectTabChild(clicked);
+                            if (directTab == null || !(directTab.getParent() instanceof ViewGroup)) {
+                                return;
+                            }
+
+                            ViewGroup bar = (ViewGroup) directTab.getParent();
+                            if (bar.getId() != sTabBarId) return;
+
+                            Activity activity = findActivity(clicked.getContext());
+                            if (activity == null || activity.isFinishing()) return;
+
+                            State state = STATES.get(activity);
+                            if (state == null || state.bar != bar || !state.isValid(activity)) {
+                                clicked.post(() -> ensureApplied(activity, 0));
+                                return;
+                            }
+
+                            state.layer.onNativeTabClicked(directTab);
+                        }
+                    }
+            );
         } catch (Throwable t) {
             lifecycleHooksInstalled = false;
             ModuleLog.line("(InstaLy | FloatingNav): lifecycle hook install failed", t);
@@ -144,7 +177,8 @@ public final class FloatingIosBottomNavHook {
 
         State existing = STATES.get(activity);
         if (existing != null) {
-            if (existing.isValid()) {
+            if (existing.isValid(activity)) {
+                existing.enforcePresentation();
                 existing.layer.requestCapture();
                 existing.layer.syncSelection(false);
                 return;
@@ -264,6 +298,7 @@ public final class FloatingIosBottomNavHook {
         layer.attachDragHandle(dragHandle);
 
         State state = new State(
+                activity,
                 bar,
                 host,
                 layer,
@@ -276,8 +311,11 @@ public final class FloatingIosBottomNavHook {
                 originalClipToPadding,
                 shadow,
                 originalShadowVisibility,
-                reservedContent
+                reservedContent,
+                sideMargin,
+                bottomMargin
         );
+        layer.setPresentationEnforcer(state::enforcePresentation);
         STATES.put(activity, state);
         RETRIES.remove(activity);
 
@@ -479,6 +517,25 @@ public final class FloatingIosBottomNavHook {
         return tabs;
     }
 
+    private static View findDirectTabChild(View clicked) {
+        View current = clicked;
+        int depth = 0;
+        while (current != null && depth < 8) {
+            Object parent = current.getParent();
+            if (parent instanceof ViewGroup) {
+                ViewGroup group = (ViewGroup) parent;
+                if (group.getId() == sTabBarId) {
+                    return current;
+                }
+                current = group;
+            } else {
+                return null;
+            }
+            depth++;
+        }
+        return null;
+    }
+
     private static int selectedNativeTabIndex(ViewGroup bar) {
         List<View> tabs = visibleNativeTabs(bar);
         for (int i = 0; i < tabs.size(); i++) {
@@ -506,6 +563,17 @@ public final class FloatingIosBottomNavHook {
             view.setLayoutParams(lp);
         }
 
+        boolean ensureZeroBottomMargin() {
+            if (!(view.getLayoutParams() instanceof ViewGroup.MarginLayoutParams)) return false;
+            ViewGroup.MarginLayoutParams lp =
+                    (ViewGroup.MarginLayoutParams) view.getLayoutParams();
+            if (lp.bottomMargin == 0) return false;
+            lp.bottomMargin = 0;
+            view.setLayoutParams(lp);
+            view.requestLayout();
+            return true;
+        }
+
         void restore() {
             if (!(view.getLayoutParams() instanceof ViewGroup.MarginLayoutParams)) return;
             ViewGroup.MarginLayoutParams lp =
@@ -517,6 +585,7 @@ public final class FloatingIosBottomNavHook {
     }
 
     private static final class State {
+        final Activity activity;
         final ViewGroup bar;
         final FrameLayout host;
         final GlassLayer layer;
@@ -530,8 +599,14 @@ public final class FloatingIosBottomNavHook {
         final View shadow;
         final int originalShadowVisibility;
         final List<MarginSnapshot> reservedContent;
+        final int sideMargin;
+        final int bottomMargin;
+
+        private boolean rebindScheduled;
+        private long lastRepairLogAt;
 
         State(
+                Activity activity,
                 ViewGroup bar,
                 FrameLayout host,
                 GlassLayer layer,
@@ -544,8 +619,11 @@ public final class FloatingIosBottomNavHook {
                 boolean originalClipToPadding,
                 View shadow,
                 int originalShadowVisibility,
-                List<MarginSnapshot> reservedContent
+                List<MarginSnapshot> reservedContent,
+                int sideMargin,
+                int bottomMargin
         ) {
+            this.activity = activity;
             this.bar = bar;
             this.host = host;
             this.layer = layer;
@@ -559,13 +637,158 @@ public final class FloatingIosBottomNavHook {
             this.shadow = shadow;
             this.originalShadowVisibility = originalShadowVisibility;
             this.reservedContent = reservedContent;
+            this.sideMargin = sideMargin;
+            this.bottomMargin = bottomMargin;
         }
 
-        boolean isValid() {
-            return bar.isAttachedToWindow()
-                    && bar.getParent() == host
-                    && layer.getParent() == host
-                    && dragHandle.getParent() == host;
+        boolean isValid(Activity owner) {
+            if (!bar.isAttachedToWindow()
+                    || bar.getParent() != host
+                    || layer.getParent() != host
+                    || dragHandle.getParent() != host) {
+                return false;
+            }
+
+            View current = sTabBarId != 0 ? owner.findViewById(sTabBarId) : null;
+            return current == bar;
+        }
+
+        void enforcePresentation() {
+            if (!FeatureFlags.floatingIosBottomNavbar || activity.isFinishing()) return;
+
+            View current = sTabBarId != 0 ? activity.findViewById(sTabBarId) : null;
+            if (current != bar) {
+                scheduleRebind();
+                return;
+            }
+
+            boolean repaired = false;
+
+            if (bar.getParent() != host) {
+                scheduleRebind();
+                return;
+            }
+
+            if (bar.getLayoutParams() instanceof FrameLayout.LayoutParams) {
+                FrameLayout.LayoutParams lp =
+                        (FrameLayout.LayoutParams) bar.getLayoutParams();
+
+                if (lp.width != ViewGroup.LayoutParams.MATCH_PARENT
+                        || lp.gravity != Gravity.BOTTOM
+                        || lp.leftMargin != sideMargin
+                        || lp.rightMargin != sideMargin
+                        || lp.bottomMargin != bottomMargin) {
+                    FrameLayout.LayoutParams fixed = new FrameLayout.LayoutParams(lp);
+                    fixed.width = ViewGroup.LayoutParams.MATCH_PARENT;
+                    fixed.gravity = Gravity.BOTTOM;
+                    fixed.leftMargin = sideMargin;
+                    fixed.rightMargin = sideMargin;
+                    fixed.bottomMargin = bottomMargin;
+                    bar.setLayoutParams(fixed);
+                    repaired = true;
+                }
+            } else {
+                scheduleRebind();
+                return;
+            }
+
+            if (bar.getBackground() != null) {
+                bar.setBackground(null);
+                repaired = true;
+            }
+
+            if (shadow != null && shadow.getVisibility() != View.GONE) {
+                shadow.setVisibility(View.GONE);
+                repaired = true;
+            }
+
+            if (host.getClipChildren()) {
+                host.setClipChildren(false);
+                repaired = true;
+            }
+            if (host.getClipToPadding()) {
+                host.setClipToPadding(false);
+                repaired = true;
+            }
+
+            // Instagram can replace the pager/content host while navigating. Track exact
+            // replacement instances before re-zeroing margins, so a freshly inflated screen
+            // cannot bring the stock bottom reservation back.
+            refreshReservedContentViews();
+            for (MarginSnapshot snapshot : reservedContent) {
+                repaired |= snapshot.ensureZeroBottomMargin();
+            }
+
+            if (layer.getLayoutParams() instanceof FrameLayout.LayoutParams) {
+                FrameLayout.LayoutParams lp =
+                        (FrameLayout.LayoutParams) layer.getLayoutParams();
+                int desiredHeight = Math.max(1, bar.getHeight());
+                if (lp.width != ViewGroup.LayoutParams.MATCH_PARENT
+                        || lp.height != desiredHeight
+                        || lp.gravity != Gravity.BOTTOM
+                        || lp.leftMargin != sideMargin
+                        || lp.rightMargin != sideMargin
+                        || lp.bottomMargin != bottomMargin) {
+                    FrameLayout.LayoutParams fixed = new FrameLayout.LayoutParams(lp);
+                    fixed.width = ViewGroup.LayoutParams.MATCH_PARENT;
+                    fixed.height = desiredHeight;
+                    fixed.gravity = Gravity.BOTTOM;
+                    fixed.leftMargin = sideMargin;
+                    fixed.rightMargin = sideMargin;
+                    fixed.bottomMargin = bottomMargin;
+                    layer.setLayoutParams(fixed);
+                    repaired = true;
+                }
+            }
+
+            if (repaired) {
+                host.requestLayout();
+                long now = SystemClock.uptimeMillis();
+                if (now - lastRepairLogAt > 750L) {
+                    lastRepairLogAt = now;
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): repaired presentation after Instagram UI refresh"
+                    );
+                }
+            }
+        }
+
+        private void refreshReservedContentViews() {
+            List<MarginSnapshot> current = findReservedContentViews(activity);
+            for (MarginSnapshot candidate : current) {
+                boolean known = false;
+                for (MarginSnapshot existing : reservedContent) {
+                    if (existing.view == candidate.view) {
+                        known = true;
+                        break;
+                    }
+                }
+                if (!known) {
+                    reservedContent.add(candidate);
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): tracking replacement "
+                                    + candidate.name
+                                    + " bottomMargin="
+                                    + candidate.originalBottomMargin
+                    );
+                }
+            }
+        }
+
+        private void scheduleRebind() {
+            if (rebindScheduled) return;
+            rebindScheduled = true;
+            View decor = activity.getWindow() != null
+                    ? activity.getWindow().getDecorView()
+                    : null;
+            if (decor == null) {
+                rebindScheduled = false;
+                return;
+            }
+            decor.post(() -> {
+                rebindScheduled = false;
+                ensureApplied(activity, 0);
+            });
         }
     }
 
@@ -581,6 +804,7 @@ public final class FloatingIosBottomNavHook {
 
         private final ViewTreeObserver.OnPreDrawListener preDrawListener;
 
+        private Runnable presentationEnforcer;
         private View dragHandle;
         private Bitmap snapshot;
         private long lastCaptureAt;
@@ -655,11 +879,11 @@ public final class FloatingIosBottomNavHook {
             lensSurfaceDrawable = new GradientDrawable();
             lensSurfaceDrawable.setCornerRadius(dp(context, 32));
             lensSurfaceDrawable.setColor(
-                    isLightTheme(context) ? 0x14000000 : 0x18FFFFFF
+                    isLightTheme(context) ? 0x1C000000 : 0x34FFFFFF
             );
             lensSurfaceDrawable.setStroke(
                     dp(context, 1),
-                    isLightTheme(context) ? 0x26000000 : 0x4DFFFFFF
+                    isLightTheme(context) ? 0x3D000000 : 0x70FFFFFF
             );
             selectionLens.setForeground(lensSurfaceDrawable);
             addView(selectionLens, new FrameLayout.LayoutParams(1, 1));
@@ -674,6 +898,10 @@ public final class FloatingIosBottomNavHook {
             setForeground(border);
 
             preDrawListener = () -> {
+                if (presentationEnforcer != null) {
+                    presentationEnforcer.run();
+                }
+
                 boolean nativeVisible = nativeBar.getVisibility() == View.VISIBLE
                         && nativeBar.getAlpha() > 0.01f;
                 int wantedVisibility = nativeVisible ? View.VISIBLE : View.INVISIBLE;
@@ -699,6 +927,10 @@ public final class FloatingIosBottomNavHook {
                 }
                 return true;
             };
+        }
+
+        void setPresentationEnforcer(Runnable enforcer) {
+            this.presentationEnforcer = enforcer;
         }
 
         void attachDragHandle(View handle) {
@@ -741,6 +973,20 @@ public final class FloatingIosBottomNavHook {
                 captureBackdrop();
                 syncSelection(false);
             });
+        }
+
+        void onNativeTabClicked(View directTab) {
+            List<View> tabs = visibleNativeTabs(nativeBar);
+            int index = tabs.indexOf(directTab);
+            if (index < 0) return;
+
+            boolean changed = visualSelectedTabIndex != index;
+            visualSelectedTabIndex = index;
+            moveLensToTab(directTab, true);
+
+            if (changed) {
+                ModuleLog.line("(InstaLy | FloatingNav): native tab -> " + index);
+            }
         }
 
         void syncSelection(boolean animate) {
@@ -1117,15 +1363,15 @@ public final class FloatingIosBottomNavHook {
             int fill = pressed
                     ? 0x08000000
                     : (isLightTheme(getContext())
-                    ? 0x14000000
-                    : 0x18FFFFFF);
+                    ? 0x1C000000
+                    : 0x34FFFFFF);
             int stroke = pressed
                     ? (isLightTheme(getContext())
                     ? 0x40000000
                     : 0x66FFFFFF)
                     : (isLightTheme(getContext())
-                    ? 0x26000000
-                    : 0x4DFFFFFF);
+                    ? 0x3D000000
+                    : 0x70FFFFFF);
 
             lensSurfaceDrawable.setColor(fill);
             lensSurfaceDrawable.setStroke(dp(getContext(), 1), stroke);
