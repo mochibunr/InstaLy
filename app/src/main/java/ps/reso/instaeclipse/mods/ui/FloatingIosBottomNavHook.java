@@ -711,8 +711,10 @@ public final class FloatingIosBottomNavHook {
                 repaired = true;
             }
 
-            // Instagram can rewrite these margins while swapping tabs/fragments. Re-zero the
-            // same native content hosts instead of letting the stock dock reservation return.
+            // Instagram can replace the pager/content host while navigating. Track exact
+            // replacement instances before re-zeroing margins, so a freshly inflated screen
+            // cannot bring the stock bottom reservation back.
+            refreshReservedContentViews();
             for (MarginSnapshot snapshot : reservedContent) {
                 repaired |= snapshot.ensureZeroBottomMargin();
             }
@@ -746,6 +748,28 @@ public final class FloatingIosBottomNavHook {
                     lastRepairLogAt = now;
                     ModuleLog.line(
                             "(InstaLy | FloatingNav): repaired presentation after Instagram UI refresh"
+                    );
+                }
+            }
+        }
+
+        private void refreshReservedContentViews() {
+            List<MarginSnapshot> current = findReservedContentViews(activity);
+            for (MarginSnapshot candidate : current) {
+                boolean known = false;
+                for (MarginSnapshot existing : reservedContent) {
+                    if (existing.view == candidate.view) {
+                        known = true;
+                        break;
+                    }
+                }
+                if (!known) {
+                    reservedContent.add(candidate);
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): tracking replacement "
+                                    + candidate.name
+                                    + " bottomMargin="
+                                    + candidate.originalBottomMargin
                     );
                 }
             }
