@@ -23,6 +23,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
 import android.view.ViewTreeObserver;
+import android.view.Window;
 import android.view.WindowInsets;
 import android.widget.Checkable;
 import android.widget.FrameLayout;
@@ -87,6 +88,7 @@ public final class FloatingIosBottomNavHook {
             return;
         }
         FrameLayout root = (FrameLayout) content;
+        WindowUiState originalWindowUi = captureWindowUiState(activity);
 
         ViewGroup bar = findBottomTabBar(activity, root);
         if (bar == null || bar.getParent() == null || bar.getWidth() <= 0 || bar.getHeight() <= 0) {
@@ -184,6 +186,14 @@ public final class FloatingIosBottomNavHook {
         wrapper.addNativeBar(bar);
         root.addView(wrapper, wrapperLp);
 
+        // The remaining "black dock" in device screenshots is Android's navigation-bar region,
+        // not Instagram's old tab container. Let Instagram content lay out behind that region and
+        // make the system navigation bar transparent, while keeping our pill above the gesture
+        // inset via wrapperLp.bottomMargin.
+        applyBottomEdgeToEdge(activity);
+        root.requestApplyInsets();
+        root.requestLayout();
+
         State state = new State(
                 bar,
                 wrapper,
@@ -202,7 +212,8 @@ public final class FloatingIosBottomNavHook {
                 collapsedDockVisibility,
                 detachedDockParent,
                 detachedDockIndex,
-                detachedDockLayoutParams
+                detachedDockLayoutParams,
+                originalWindowUi
         );
         STATES.put(activity, state);
         RETRIES.remove(activity);
@@ -214,7 +225,9 @@ public final class FloatingIosBottomNavHook {
                 + ", detachedDock=" + (collapsedDock != null
                 ? describeView(activity, collapsedDock)
                 : "none")
-                + ", dockRemoved=" + (detachedDockParent != null));
+                + ", dockRemoved=" + (detachedDockParent != null)
+                + ", edgeToEdgeBottom=true"
+                + ", navInset=" + navInset + "px");
 
         wrapper.post(wrapper::requestCapture);
     }
@@ -285,6 +298,13 @@ public final class FloatingIosBottomNavHook {
             int index = Math.max(0, Math.min(state.originalIndex, state.originalParent.getChildCount()));
             state.originalParent.addView(state.bar, index, state.originalLayoutParams);
             state.originalParent.requestLayout();
+
+            restoreWindowUiState(activity, state.originalWindowUi);
+            View restoredContent = activity.findViewById(android.R.id.content);
+            if (restoredContent != null) {
+                restoredContent.requestApplyInsets();
+                restoredContent.requestLayout();
+            }
             ModuleLog.line("(InstaLy | FloatingNav): restored Instagram native bottom bar");
         } catch (Throwable t) {
             ModuleLog.line("(InstaLy | FloatingNav): restore failed", t);
@@ -447,6 +467,76 @@ public final class FloatingIosBottomNavHook {
         return count;
     }
 
+    private static WindowUiState captureWindowUiState(Activity activity) {
+        Window window = activity.getWindow();
+        if (window == null) return null;
+
+        View decor = window.getDecorView();
+        int systemUiVisibility = decor != null ? decor.getSystemUiVisibility() : 0;
+        int navigationBarColor = window.getNavigationBarColor();
+        int navigationBarDividerColor = Build.VERSION.SDK_INT >= 28
+                ? window.getNavigationBarDividerColor()
+                : Color.TRANSPARENT;
+        boolean navigationBarContrastEnforced = Build.VERSION.SDK_INT >= 29
+                && window.isNavigationBarContrastEnforced();
+
+        return new WindowUiState(
+                systemUiVisibility,
+                navigationBarColor,
+                navigationBarDividerColor,
+                navigationBarContrastEnforced
+        );
+    }
+
+    @SuppressWarnings("deprecation")
+    private static void applyBottomEdgeToEdge(Activity activity) {
+        try {
+            Window window = activity.getWindow();
+            if (window == null) return;
+
+            View decor = window.getDecorView();
+            if (decor != null) {
+                int flags = decor.getSystemUiVisibility();
+                flags |= View.SYSTEM_UI_FLAG_LAYOUT_STABLE;
+                flags |= View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
+                decor.setSystemUiVisibility(flags);
+            }
+
+            window.setNavigationBarColor(Color.TRANSPARENT);
+            if (Build.VERSION.SDK_INT >= 28) {
+                window.setNavigationBarDividerColor(Color.TRANSPARENT);
+            }
+            if (Build.VERSION.SDK_INT >= 29) {
+                window.setNavigationBarContrastEnforced(false);
+            }
+        } catch (Throwable t) {
+            ModuleLog.line("(InstaLy | FloatingNav): bottom edge-to-edge setup failed", t);
+        }
+    }
+
+    @SuppressWarnings("deprecation")
+    private static void restoreWindowUiState(Activity activity, WindowUiState state) {
+        if (state == null) return;
+        try {
+            Window window = activity.getWindow();
+            if (window == null) return;
+
+            View decor = window.getDecorView();
+            if (decor != null) {
+                decor.setSystemUiVisibility(state.systemUiVisibility);
+            }
+            window.setNavigationBarColor(state.navigationBarColor);
+            if (Build.VERSION.SDK_INT >= 28) {
+                window.setNavigationBarDividerColor(state.navigationBarDividerColor);
+            }
+            if (Build.VERSION.SDK_INT >= 29) {
+                window.setNavigationBarContrastEnforced(state.navigationBarContrastEnforced);
+            }
+        } catch (Throwable t) {
+            ModuleLog.line("(InstaLy | FloatingNav): bottom edge-to-edge restore failed", t);
+        }
+    }
+
     private static int navigationBarInset(View view) {
         try {
             WindowInsets insets = view.getRootWindowInsets();
@@ -480,6 +570,25 @@ public final class FloatingIosBottomNavHook {
         return night != Configuration.UI_MODE_NIGHT_YES;
     }
 
+    private static final class WindowUiState {
+        final int systemUiVisibility;
+        final int navigationBarColor;
+        final int navigationBarDividerColor;
+        final boolean navigationBarContrastEnforced;
+
+        WindowUiState(
+                int systemUiVisibility,
+                int navigationBarColor,
+                int navigationBarDividerColor,
+                boolean navigationBarContrastEnforced
+        ) {
+            this.systemUiVisibility = systemUiVisibility;
+            this.navigationBarColor = navigationBarColor;
+            this.navigationBarDividerColor = navigationBarDividerColor;
+            this.navigationBarContrastEnforced = navigationBarContrastEnforced;
+        }
+    }
+
     private static final class State {
         final ViewGroup bar;
         final LiquidGlassContainer wrapper;
@@ -499,6 +608,7 @@ public final class FloatingIosBottomNavHook {
         final ViewGroup detachedDockParent;
         final int detachedDockIndex;
         final ViewGroup.LayoutParams detachedDockLayoutParams;
+        final WindowUiState originalWindowUi;
 
         State(
                 ViewGroup bar,
@@ -518,7 +628,8 @@ public final class FloatingIosBottomNavHook {
                 int collapsedDockVisibility,
                 ViewGroup detachedDockParent,
                 int detachedDockIndex,
-                ViewGroup.LayoutParams detachedDockLayoutParams
+                ViewGroup.LayoutParams detachedDockLayoutParams,
+                WindowUiState originalWindowUi
         ) {
             this.bar = bar;
             this.wrapper = wrapper;
@@ -538,6 +649,7 @@ public final class FloatingIosBottomNavHook {
             this.detachedDockParent = detachedDockParent;
             this.detachedDockIndex = detachedDockIndex;
             this.detachedDockLayoutParams = detachedDockLayoutParams;
+            this.originalWindowUi = originalWindowUi;
         }
     }
 
