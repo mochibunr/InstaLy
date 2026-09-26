@@ -70,7 +70,7 @@ public class DisableRepostHook {
         total += installFeedCommit(classLoader);
 
         if (total > 0) FeatureStatusTracker.setHooked("DisableRepost");
-        ModuleLog.line("(IE|Repost) ✅ installed: " + total + " method(s)");
+        ModuleLog.line("(InstaLy | Repost) ✅ installed: " + total + " method(s)");
     }
 
     // Reels + profile path — swallow the shared handler's void entry points entirely.
@@ -80,7 +80,7 @@ public class DisableRepostHook {
             protected void beforeHookedMethod(MethodHookParam param) {
                 if (FeatureFlags.disableRepost) {
                     param.setResult(null); // void method → skip original entirely
-                    ModuleLog.line("(IE|Repost) neutralized repost action");
+                    ModuleLog.line("(InstaLy | Repost) neutralized repost action");
                 }
             }
         };
@@ -99,7 +99,7 @@ public class DisableRepostHook {
                     } catch (Throwable ignored) {}
                 }
             } catch (Throwable t) {
-                ModuleLog.line("(IE|Repost) ⚠️ anchor " + anchor + ": " + t.getMessage());
+                ModuleLog.line("(InstaLy | Repost) ⚠️ anchor " + anchor + ": " + t.getMessage());
             }
         }
         return total;
@@ -112,7 +112,7 @@ public class DisableRepostHook {
             protected void beforeHookedMethod(MethodHookParam param) {
                 if (FeatureFlags.disableRepost) {
                     param.setResult(null); // void launcher → coroutine never built/launched
-                    ModuleLog.line("(IE|Repost) neutralized FEED repost (postRepost)");
+                    ModuleLog.line("(InstaLy | Repost) neutralized FEED repost (postRepost)");
                 }
             }
         };
@@ -136,7 +136,7 @@ public class DisableRepostHook {
             }
 
             if (owner == null) {
-                ModuleLog.line("(IE|Repost) ⚠️ RepostsRepository owner not resolved");
+                ModuleLog.line("(InstaLy | Repost) ⚠️ RepostsRepository owner not resolved");
                 return 0;
             }
 
@@ -148,12 +148,12 @@ public class DisableRepostHook {
                     total++;
                 } catch (Throwable ignored) {}
             }
-            if (total == 0) ModuleLog.line("(IE|Repost) ⚠️ postRepost launcher not found on "
+            if (total == 0) ModuleLog.line("(InstaLy | Repost) ⚠️ postRepost launcher not found on "
                     + owner.getName());
         } catch (Throwable t) {
-            ModuleLog.line("(IE|Repost) ⚠️ feed postRepost hook: " + t.getMessage());
+            ModuleLog.line("(InstaLy | Repost) ⚠️ feed postRepost hook: " + t.getMessage());
         }
-        ModuleLog.line("(IE|Repost) feed postRepost launcher: " + total + " method(s)");
+        ModuleLog.line("(InstaLy | Repost) feed postRepost launcher: " + total + " method(s)");
         return total;
     }
 
