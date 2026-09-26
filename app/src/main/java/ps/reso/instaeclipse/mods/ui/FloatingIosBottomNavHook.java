@@ -2,6 +2,7 @@ package ps.reso.instaeclipse.mods.ui;
 
 import android.app.Activity;
 import android.content.Context;
+import android.content.ContextWrapper;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
@@ -23,41 +24,51 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
 import android.view.ViewTreeObserver;
-import android.view.WindowInsets;
+import android.view.animation.OvershootInterpolator;
 import android.widget.Checkable;
 import android.widget.FrameLayout;
-import android.view.animation.OvershootInterpolator;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.WeakHashMap;
 
-import ps.reso.instaeclipse.R;
+import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.XposedHelpers;
 import ps.reso.instaeclipse.utils.feature.FeatureFlags;
 import ps.reso.instaeclipse.utils.feature.FeatureStatusTracker;
 import ps.reso.instaeclipse.utils.log.ModuleLog;
 
 /**
- * Floats Instagram's own bottom tab bar and renders a live liquid-glass backdrop behind it.
+ * Instagram-native floating bottom navigation.
  *
- * The native Instagram tab views are preserved and remain responsible for navigation, selected
- * state, accessibility and experiments. InstaLy only reparents/stylizes the visual container.
+ * Architecture intentionally follows the stable part of WaEnhancer's FloatingBottomBar design:
+ * keep the target application's real navigation hierarchy and move/style only presentation.
+ *
+ * Instagram is NOT laid out like WhatsApp. Public/decompiled Instagram layouts show that tab_bar
+ * is already a bottom-gravity child of layout_container_main_wrapper, next to:
+ *   - layout_container_main / swipeable_tab_view_pager, whose bottom margin reserves tabBarHeight
+ *   - tab_bar_shadow, a separate sibling
+ *
+ * Therefore InstaLy never reparents tab_bar. It clears only Instagram's real reserved content
+ * margins, hides the real shadow, and inserts glass as a sibling behind the native tab bar.
  *
  * Liquid-glass refraction math is adapted from Kyant0/AndroidLiquidGlass (Backdrop), Copyright
- * 2025 Kyant, Apache License 2.0. The original Compose implementation records a backdrop layer and
- * chains vibrancy -> blur -> RuntimeShader refraction. This native-View adaptation captures only
- * the narrow screen strip behind Instagram's tab bar and applies the same effect ordering through
- * Android RenderEffect. See THIRD_PARTY_NOTICES.md.
+ * 2025 Kyant, Apache License 2.0. See THIRD_PARTY_NOTICES.md.
  */
 public final class FloatingIosBottomNavHook {
 
     private static final String FEATURE_KEY = "FloatingIosBottomNav";
-    private static final long CAPTURE_INTERVAL_MS = 33L;   // ~30 FPS, only while enabled/visible.
-    private static final long SELECTION_INTERVAL_MS = 120L;
-    private static final int MAX_APPLY_ATTEMPTS = 6;
+    private static final long CAPTURE_INTERVAL_MS = 40L;
+    private static final long SELECTION_INTERVAL_MS = 70L;
+    private static final int MAX_APPLY_ATTEMPTS = 8;
+    private static final int SIDE_MARGIN_DP = 12;
+    private static final int BOTTOM_MARGIN_DP = 16;
 
     private static final WeakHashMap<Activity, State> STATES = new WeakHashMap<>();
     private static final WeakHashMap<Activity, Integer> RETRIES = new WeakHashMap<>();
+
+    private static boolean lifecycleHooksInstalled;
+    private static int sTabBarId;
 
     private FloatingIosBottomNavHook() {}
 
@@ -65,6 +76,8 @@ public final class FloatingIosBottomNavHook {
         if (activity == null || activity.isFinishing()) return;
         activity.runOnUiThread(() -> {
             if (FeatureFlags.floatingIosBottomNavbar) {
+                resolveTabBarId(activity);
+                ensureLifecycleHooksInstalled();
                 ensureApplied(activity, 0);
             } else {
                 restore(activity);
@@ -72,165 +85,224 @@ public final class FloatingIosBottomNavHook {
         });
     }
 
+    private static void resolveTabBarId(Activity activity) {
+        if (sTabBarId != 0) return;
+        sTabBarId = resourceId(activity, "tab_bar");
+    }
+
+    private static synchronized void ensureLifecycleHooksInstalled() {
+        if (lifecycleHooksInstalled) return;
+        lifecycleHooksInstalled = true;
+
+        try {
+            XposedHelpers.findAndHookMethod(
+                    View.class,
+                    "onAttachedToWindow",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (!FeatureFlags.floatingIosBottomNavbar || sTabBarId == 0) return;
+                            View view = (View) param.thisObject;
+                            if (view.getId() != sTabBarId || !(view instanceof ViewGroup)) return;
+
+                            Activity activity = findActivity(view.getContext());
+                            if (activity == null || activity.isFinishing()) return;
+                            view.post(() -> ensureApplied(activity, 0));
+                        }
+                    }
+            );
+
+            XposedHelpers.findAndHookMethod(
+                    View.class,
+                    "onDetachedFromWindow",
+                    new XC_MethodHook() {
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (!FeatureFlags.floatingIosBottomNavbar || sTabBarId == 0) return;
+                            View view = (View) param.thisObject;
+                            if (view.getId() != sTabBarId) return;
+
+                            Activity activity = findActivity(view.getContext());
+                            if (activity == null || activity.isFinishing()) return;
+                            View decor = activity.getWindow() != null
+                                    ? activity.getWindow().getDecorView()
+                                    : null;
+                            if (decor != null) {
+                                decor.postDelayed(() -> ensureApplied(activity, 0), 90L);
+                            }
+                        }
+                    }
+            );
+        } catch (Throwable t) {
+            lifecycleHooksInstalled = false;
+            ModuleLog.line("(InstaLy | FloatingNav): lifecycle hook install failed", t);
+        }
+    }
+
     private static void ensureApplied(Activity activity, int attempt) {
         if (!FeatureFlags.floatingIosBottomNavbar || activity.isFinishing()) return;
 
         State existing = STATES.get(activity);
-        if (existing != null && existing.wrapper.getParent() != null) {
-            existing.wrapper.requestCapture();
+        if (existing != null) {
+            if (existing.isValid()) {
+                existing.layer.requestCapture();
+                existing.layer.syncSelection(false);
+                return;
+            }
+            removeState(activity, existing, true);
+        }
+
+        int tabBarId = resourceId(activity, "tab_bar");
+        int wrapperId = resourceId(activity, "layout_container_main_wrapper");
+        int panelId = resourceId(activity, "layout_container_main_panel");
+        int shadowId = resourceId(activity, "tab_bar_shadow");
+
+        View rawBar = tabBarId != 0 ? activity.findViewById(tabBarId) : null;
+        if (!(rawBar instanceof ViewGroup)
+                || rawBar.getParent() == null
+                || rawBar.getWidth() <= 0
+                || rawBar.getHeight() <= 0) {
+            retry(activity, attempt, "exact #tab_bar is not ready");
             return;
         }
 
-        View content = activity.findViewById(android.R.id.content);
-        if (!(content instanceof FrameLayout)) {
-            retry(activity, attempt, "content root is not a FrameLayout");
-            return;
-        }
-        FrameLayout root = (FrameLayout) content;
-
-        ViewGroup bar = findBottomTabBar(activity, root);
-        if (bar == null || bar.getParent() == null || bar.getWidth() <= 0 || bar.getHeight() <= 0) {
-            retry(activity, attempt, "native tab bar not ready");
+        ViewGroup bar = (ViewGroup) rawBar;
+        if (!(bar.getParent() instanceof FrameLayout)) {
+            retry(activity, attempt,
+                    "#tab_bar parent is not FrameLayout: " + describeParent(bar));
             return;
         }
 
-        if (!(bar.getParent() instanceof ViewGroup)) {
-            retry(activity, attempt, "tab bar parent unavailable");
+        FrameLayout host = (FrameLayout) bar.getParent();
+        int hostId = host.getId();
+        boolean knownInstagramHost = hostId == wrapperId || hostId == panelId;
+        if (!knownInstagramHost) {
+            retry(activity, attempt,
+                    "#tab_bar parent is unexpected: " + describeView(activity, host));
             return;
         }
 
-        ViewGroup originalParent = (ViewGroup) bar.getParent();
-        int originalIndex = originalParent.indexOfChild(bar);
-        ViewGroup.LayoutParams originalLayoutParams = bar.getLayoutParams();
-        Drawable originalBackground = bar.getBackground();
-        float originalElevation = bar.getElevation();
-        int originalPaddingStart = bar.getPaddingStart();
-        int originalPaddingTop = bar.getPaddingTop();
-        int originalPaddingEnd = bar.getPaddingEnd();
-        int originalPaddingBottom = bar.getPaddingBottom();
-        int originalParentVisibility = originalParent.getVisibility();
-
-        // Locate the compact dock that used to own the native tab row BEFORE detaching the bar.
-        // Instagram 449 leaves decorative/background siblings behind, so checking childCount()==0
-        // is not enough; that is the full-width dark strip visible behind the floating capsule.
-        ViewGroup collapsedDock = findDockContainer(bar, root, activity);
-        ViewGroup detachedDockParent = null;
-        int detachedDockIndex = -1;
-        ViewGroup.LayoutParams detachedDockLayoutParams = null;
-        int collapsedDockVisibility = collapsedDock != null
-                ? collapsedDock.getVisibility()
-                : View.VISIBLE;
-
-        if (collapsedDock != null && collapsedDock != root
-                && collapsedDock.getParent() instanceof ViewGroup) {
-            detachedDockParent = (ViewGroup) collapsedDock.getParent();
-            detachedDockIndex = detachedDockParent.indexOfChild(collapsedDock);
-            detachedDockLayoutParams = collapsedDock.getLayoutParams();
+        if (!(bar.getLayoutParams() instanceof FrameLayout.LayoutParams)) {
+            retry(activity, attempt, "#tab_bar does not use FrameLayout.LayoutParams");
+            return;
         }
 
-        int navInset = navigationBarInset(root);
-        int contentBottomGap = bottomGapToDecor(activity, root);
-        boolean rootAlreadyConsumesNavInset = navInset > 0
-                && contentBottomGap >= Math.max(dp(activity, 8), navInset / 2);
-        int sideMargin = dp(activity, 12);
-        int bottomMargin = dp(activity, 12)
-                + (rootAlreadyConsumesNavInset ? 0 : navInset);
-
-        originalParent.removeView(bar);
-        boolean collapsedOriginalParent = false;
-        if (collapsedDock != null && detachedDockParent != null) {
-            // WAEnhancer's important trick: remove the ENTIRE native dock from its old layout,
-            // not just the tab row. This removes Instagram's reserved bottom-navigation slot and
-            // its divider/background helpers, allowing the feed/content host to lay out through
-            // the space behind our floating pill.
-            detachedDockParent.removeView(collapsedDock);
-            detachedDockParent.requestLayout();
-            root.requestLayout();
-        } else if (originalParent != root && originalParent.getChildCount() == 0) {
-            // Conservative fallback for layouts where no outer dock can be identified.
-            originalParent.setVisibility(View.GONE);
-            collapsedOriginalParent = true;
-            originalParent.requestLayout();
-            root.requestLayout();
+        List<MarginSnapshot> reservedContent = findReservedContentViews(activity);
+        if (reservedContent.isEmpty()) {
+            retry(activity, attempt,
+                    "Instagram content hosts (#layout_container_main / #swipeable_tab_view_pager) not found");
+            return;
         }
 
-        final int nativeBarHeight = Math.max(1, bar.getHeight());
-        LiquidGlassContainer wrapper = new LiquidGlassContainer(activity, root, bar);
-        FrameLayout.LayoutParams wrapperLp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                nativeBarHeight,
-                Gravity.BOTTOM
-        );
-        wrapperLp.leftMargin = sideMargin;
-        wrapperLp.rightMargin = sideMargin;
-        wrapperLp.bottomMargin = bottomMargin;
+        final FrameLayout.LayoutParams originalBarLayoutParams =
+                new FrameLayout.LayoutParams((FrameLayout.LayoutParams) bar.getLayoutParams());
+        final Drawable originalBarBackground = bar.getBackground();
+        final float originalBarElevation = bar.getElevation();
+        final float originalBarTranslationZ = bar.getTranslationZ();
+        final boolean originalClipChildren = host.getClipChildren();
+        final boolean originalClipToPadding = host.getClipToPadding();
 
-        FrameLayout.LayoutParams barLp = new FrameLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                nativeBarHeight,
-                Gravity.CENTER
-        );
-        bar.setLayoutParams(barLp);
+        View shadow = shadowId != 0 ? activity.findViewById(shadowId) : null;
+        int originalShadowVisibility = shadow != null ? shadow.getVisibility() : View.VISIBLE;
+
+        // This is the actual strip reservation in Instagram: the content hosts end exactly where
+        // tab_bar begins. Expand them to the bottom of their native wrapper while leaving tab_bar
+        // itself owned by Instagram.
+        StringBuilder marginLog = new StringBuilder();
+        for (MarginSnapshot snapshot : reservedContent) {
+            if (marginLog.length() > 0) marginLog.append(", ");
+            marginLog.append(snapshot.name)
+                    .append(":")
+                    .append(snapshot.originalBottomMargin)
+                    .append("->0");
+            snapshot.applyZeroBottomMargin();
+        }
+
+        if (shadow != null) shadow.setVisibility(View.GONE);
+
+        host.setClipChildren(false);
+        host.setClipToPadding(false);
+
+        int sideMargin = dp(activity, SIDE_MARGIN_DP);
+        int bottomMargin = dp(activity, BOTTOM_MARGIN_DP);
+
+        // Instagram's wrapper lives inside a fitsSystemWindows root. Do NOT add the system nav
+        // inset again; doing so double-counts the gesture/navigation region on this layout.
+        FrameLayout.LayoutParams floatingBarLp =
+                new FrameLayout.LayoutParams(originalBarLayoutParams);
+        floatingBarLp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+        floatingBarLp.gravity = Gravity.BOTTOM;
+        floatingBarLp.leftMargin = sideMargin;
+        floatingBarLp.rightMargin = sideMargin;
+        floatingBarLp.bottomMargin = bottomMargin;
+        bar.setLayoutParams(floatingBarLp);
         bar.setBackground(null);
-        bar.setElevation(0f);
 
-        // Instagram commonly consumes the navigation-bar inset as bottom padding while its tab bar
-        // is docked. Once floating above that inset we remove only the duplicated portion.
-        if (navInset > 0 && originalPaddingBottom >= navInset) {
-            bar.setPaddingRelative(
-                    originalPaddingStart,
-                    originalPaddingTop,
-                    originalPaddingEnd,
-                    originalPaddingBottom - navInset
-            );
+        int barIndex = host.indexOfChild(bar);
+        if (barIndex < 0) {
+            restoreReservedContent(reservedContent);
+            if (shadow != null) shadow.setVisibility(originalShadowVisibility);
+            retry(activity, attempt, "#tab_bar index unavailable");
+            return;
         }
 
-        wrapper.addNativeBar(bar);
-        root.addView(wrapper, wrapperLp);
+        GlassLayer layer = new GlassLayer(activity, host, bar, shadow);
+        FrameLayout.LayoutParams layerLp = new FrameLayout.LayoutParams(floatingBarLp);
+        layerLp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+        layerLp.height = bar.getHeight();
+        host.addView(layer, barIndex, layerLp);
+
+        View dragHandle = new View(activity);
+        dragHandle.setBackgroundColor(Color.TRANSPARENT);
+        dragHandle.setClickable(true);
+        dragHandle.setFocusable(false);
+        dragHandle.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+        dragHandle.setElevation(Math.max(bar.getElevation(), dp(activity, 4)) + dp(activity, 4));
+        host.addView(dragHandle, new FrameLayout.LayoutParams(1, 1));
+        dragHandle.bringToFront();
+
+        layer.attachDragHandle(dragHandle);
 
         State state = new State(
                 bar,
-                wrapper,
-                originalParent,
-                originalIndex,
-                originalLayoutParams,
-                originalBackground,
-                originalElevation,
-                originalPaddingStart,
-                originalPaddingTop,
-                originalPaddingEnd,
-                originalPaddingBottom,
-                originalParentVisibility,
-                collapsedOriginalParent,
-                collapsedDock,
-                collapsedDockVisibility,
-                detachedDockParent,
-                detachedDockIndex,
-                detachedDockLayoutParams
+                host,
+                layer,
+                dragHandle,
+                originalBarLayoutParams,
+                originalBarBackground,
+                originalBarElevation,
+                originalBarTranslationZ,
+                originalClipChildren,
+                originalClipToPadding,
+                shadow,
+                originalShadowVisibility,
+                reservedContent
         );
         STATES.put(activity, state);
         RETRIES.remove(activity);
 
-        FeatureStatusTracker.setHooked(FEATURE_KEY);
-        ModuleLog.line("(InstaLy | FloatingNav): applied liquid glass to "
-                + describeView(activity, bar)
-                + ", wrapperHeight=" + nativeBarHeight + "px"
-                + ", detachedDock=" + (collapsedDock != null
-                ? describeView(activity, collapsedDock)
-                : "none")
-                + ", dockRemoved=" + (detachedDockParent != null)
-                + ", navInset=" + navInset + "px"
-                + ", contentBottomGap=" + contentBottomGap + "px"
-                + ", rootAlreadyInset=" + rootAlreadyConsumesNavInset
-                + ", bottomMargin=" + bottomMargin + "px");
+        host.requestLayout();
+        for (MarginSnapshot snapshot : reservedContent) {
+            snapshot.view.requestLayout();
+        }
 
-        wrapper.post(wrapper::requestCapture);
+        FeatureStatusTracker.setHooked(FEATURE_KEY);
+        ModuleLog.line("(InstaLy | FloatingNav): native in-place applied"
+                + " bar=" + describeView(activity, bar)
+                + " parent=" + describeView(activity, host)
+                + " reserved=[" + marginLog + "]"
+                + " shadow=" + (shadow != null ? "hidden" : "missing")
+                + " sideMargin=" + sideMargin + "px"
+                + " bottomMargin=" + bottomMargin + "px"
+                + " barReparented=false");
+
+        layer.post(layer::requestCapture);
     }
 
     private static void retry(Activity activity, int attempt, String reason) {
         if (attempt >= MAX_APPLY_ATTEMPTS) {
             RETRIES.remove(activity);
-            ModuleLog.line("(InstaLy | FloatingNav): could not locate bottom bar (" + reason + ")");
+            ModuleLog.line("(InstaLy | FloatingNav): exact Instagram layout unavailable (" + reason + ")");
             FeatureStatusTracker.setBroken(FEATURE_KEY);
             return;
         }
@@ -244,7 +316,7 @@ public final class FloatingIosBottomNavHook {
         decor.postDelayed(() -> {
             RETRIES.remove(activity);
             ensureApplied(activity, attempt + 1);
-        }, 120L + attempt * 80L);
+        }, 100L + attempt * 80L);
     }
 
     public static void restore(Activity activity) {
@@ -252,370 +324,299 @@ public final class FloatingIosBottomNavHook {
         State state = STATES.remove(activity);
         RETRIES.remove(activity);
         if (state == null) return;
+        removeState(activity, state, true);
+        ModuleLog.line("(InstaLy | FloatingNav): restored native Instagram layout");
+    }
 
+    private static void removeState(Activity activity, State state, boolean restoreNativeLayout) {
         try {
-            state.wrapper.dispose();
+            state.layer.dispose();
 
-            if (state.bar.getParent() instanceof ViewGroup) {
-                ((ViewGroup) state.bar.getParent()).removeView(state.bar);
+            if (state.dragHandle.getParent() instanceof ViewGroup) {
+                ((ViewGroup) state.dragHandle.getParent()).removeView(state.dragHandle);
             }
-            if (state.wrapper.getParent() instanceof ViewGroup) {
-                ((ViewGroup) state.wrapper.getParent()).removeView(state.wrapper);
-            }
-
-            state.bar.setBackground(state.originalBackground);
-            state.bar.setElevation(state.originalElevation);
-            state.bar.setPaddingRelative(
-                    state.originalPaddingStart,
-                    state.originalPaddingTop,
-                    state.originalPaddingEnd,
-                    state.originalPaddingBottom
-            );
-            state.bar.setLayoutParams(state.originalLayoutParams);
-
-            if (state.detachedDockParent != null && state.collapsedDock != null
-                    && state.collapsedDock.getParent() == null) {
-                state.collapsedDock.setVisibility(state.collapsedDockVisibility);
-                int dockIndex = Math.max(
-                        0,
-                        Math.min(state.detachedDockIndex, state.detachedDockParent.getChildCount())
-                );
-                state.detachedDockParent.addView(
-                        state.collapsedDock,
-                        dockIndex,
-                        state.detachedDockLayoutParams
-                );
-                state.detachedDockParent.requestLayout();
-            } else if (state.collapsedOriginalParent) {
-                state.originalParent.setVisibility(state.originalParentVisibility);
+            if (state.layer.getParent() instanceof ViewGroup) {
+                ((ViewGroup) state.layer.getParent()).removeView(state.layer);
             }
 
-            int index = Math.max(0, Math.min(state.originalIndex, state.originalParent.getChildCount()));
-            state.originalParent.addView(state.bar, index, state.originalLayoutParams);
-            state.originalParent.requestLayout();
+            if (restoreNativeLayout) {
+                state.bar.setLayoutParams(state.originalBarLayoutParams);
+                state.bar.setBackground(state.originalBarBackground);
+                state.bar.setElevation(state.originalBarElevation);
+                state.bar.setTranslationZ(state.originalBarTranslationZ);
 
-            ModuleLog.line("(InstaLy | FloatingNav): restored Instagram native bottom bar");
+                restoreReservedContent(state.reservedContent);
+
+                if (state.shadow != null) {
+                    state.shadow.setVisibility(state.originalShadowVisibility);
+                }
+
+                state.host.setClipChildren(state.originalClipChildren);
+                state.host.setClipToPadding(state.originalClipToPadding);
+                state.host.requestLayout();
+            }
         } catch (Throwable t) {
-            ModuleLog.line("(InstaLy | FloatingNav): restore failed", t);
+            ModuleLog.line("(InstaLy | FloatingNav): cleanup failed", t);
+        } finally {
+            STATES.remove(activity);
+        }
+    }
+
+    private static List<MarginSnapshot> findReservedContentViews(Activity activity) {
+        List<MarginSnapshot> result = new ArrayList<>();
+
+        // These are exact Instagram resource IDs visible in the current main-activity hierarchy.
+        // Both can reserve tabBarHeight depending on the active navigation experiment.
+        String[] names = {
+                "layout_container_main",
+                "swipeable_tab_view_pager"
+        };
+
+        for (String name : names) {
+            int id = resourceId(activity, name);
+            if (id == 0) continue;
+            View view = activity.findViewById(id);
+            if (view == null || !(view.getLayoutParams() instanceof ViewGroup.MarginLayoutParams)) {
+                continue;
+            }
+
+            ViewGroup.MarginLayoutParams lp =
+                    (ViewGroup.MarginLayoutParams) view.getLayoutParams();
+            result.add(new MarginSnapshot(view, name, lp.bottomMargin));
+        }
+
+        return result;
+    }
+
+    private static void restoreReservedContent(List<MarginSnapshot> snapshots) {
+        for (MarginSnapshot snapshot : snapshots) {
+            snapshot.restore();
         }
     }
 
     @SuppressWarnings("DiscouragedApi")
-    private static ViewGroup findBottomTabBar(Activity activity, ViewGroup root) {
-        String pkg = activity.getPackageName();
-
-        // Fast path for resource names seen across Instagram/Meta tab implementations.
-        String[] barNames = {
-                "bottom_navigation", "bottom_nav", "bottom_navigation_bar",
-                "tab_bar", "tab_bar_layout", "main_tab_bar", "main_tabs", "tabs_container"
-        };
-        for (String name : barNames) {
-            int id = activity.getResources().getIdentifier(name, "id", pkg);
-            if (id == 0) continue;
-            View v = activity.findViewById(id);
-            if (v instanceof ViewGroup && looksLikeBottomBar((ViewGroup) v, root, activity)) {
-                return (ViewGroup) v;
-            }
-        }
-
-        // Version-resilient path: InstaLy already relies on these stable Instagram IDs to open its
-        // settings. Walk upward from an actual native tab and choose the horizontal near-bottom row.
-        String[] anchorNames = {
-                "search_tab", "direct_tab", "profile_tab", "reels_tab", "feed_tab", "home_tab"
-        };
-
-        View anchor = null;
-        for (String name : anchorNames) {
-            int id = activity.getResources().getIdentifier(name, "id", pkg);
-            if (id == 0) continue;
-            anchor = activity.findViewById(id);
-            if (anchor != null) break;
-        }
-        if (anchor == null) return null;
-
-        ViewGroup best = null;
-        int bestScore = Integer.MIN_VALUE;
-        int depth = 0;
-        View current = anchor;
-        while (current != null && current != root && depth < 9) {
-            if (current instanceof ViewGroup) {
-                ViewGroup group = (ViewGroup) current;
-                int score = scoreBottomBar(group, root, activity) - depth;
-                if (score > bestScore) {
-                    bestScore = score;
-                    best = group;
-                }
-            }
-            Object parent = current.getParent();
-            current = parent instanceof View ? (View) parent : null;
-            depth++;
-        }
-
-        return bestScore >= 7 ? best : null;
-    }
-
-    private static boolean looksLikeBottomBar(ViewGroup candidate, ViewGroup root, Context context) {
-        return scoreBottomBar(candidate, root, context) >= 7;
-    }
-
-    private static int scoreBottomBar(ViewGroup candidate, ViewGroup root, Context context) {
-        int width = candidate.getWidth();
-        int height = candidate.getHeight();
-        int rootWidth = root.getWidth();
-        int score = 0;
-
-        if (width > 0 && rootWidth > 0 && width >= rootWidth * 0.55f) score += 4;
-        int minH = dp(context, 38);
-        int maxH = dp(context, 132);
-        if (height >= minH && height <= maxH) score += 4;
-
-        int[] c = new int[2];
-        int[] r = new int[2];
+    private static int resourceId(Context context, String name) {
         try {
-            candidate.getLocationInWindow(c);
-            root.getLocationInWindow(r);
-            int rootBottom = r[1] + root.getHeight();
-            int candidateBottom = c[1] + height;
-            int gap = Math.abs(rootBottom - candidateBottom);
-            if (gap <= dp(context, 180)) score += 4;
-        } catch (Throwable ignored) {}
-
-        int visibleChildren = 0;
-        for (int i = 0; i < candidate.getChildCount(); i++) {
-            View child = candidate.getChildAt(i);
-            if (child.getVisibility() == View.VISIBLE && child.getWidth() > 0) visibleChildren++;
-        }
-        if (visibleChildren >= 3 && visibleChildren <= 7) score += 3;
-        if (countInteractiveDescendants(candidate, 2) >= 3) score += 2;
-
-        try {
-            int id = candidate.getId();
-            if (id != View.NO_ID && id != 0) {
-                String name = candidate.getResources().getResourceEntryName(id).toLowerCase();
-                if (name.contains("tab") || name.contains("nav")) score += 5;
-            }
-        } catch (Throwable ignored) {}
-
-        return score;
-    }
-
-    private static ViewGroup findDockContainer(
-            ViewGroup bar,
-            FrameLayout root,
-            Context context
-    ) {
-        int barHeight = Math.max(1, bar.getHeight());
-        int rootWidth = root.getWidth();
-        int[] rootLocation = new int[2];
-        try { root.getLocationInWindow(rootLocation); } catch (Throwable ignored) {}
-        int rootBottom = rootLocation[1] + root.getHeight();
-
-        ViewGroup best = null;
-        View current = bar.getParent() instanceof View ? (View) bar.getParent() : null;
-        int depth = 0;
-        while (current instanceof ViewGroup && current != root && depth < 5) {
-            ViewGroup group = (ViewGroup) current;
-            int h = group.getHeight();
-            int w = group.getWidth();
-            int[] location = new int[2];
-            try { group.getLocationInWindow(location); } catch (Throwable ignored) {}
-
-            int bottomGap = Math.abs(rootBottom - (location[1] + h));
-            boolean compactHeight = h > 0
-                    && h <= barHeight + dp(context, 80)
-                    && h >= Math.max(dp(context, 36), barHeight / 2);
-            boolean wideEnough = rootWidth <= 0 || w >= rootWidth * 0.70f;
-            boolean nearBottom = bottomGap <= dp(context, 200);
-
-            if (compactHeight && wideEnough && nearBottom) {
-                // Keep walking and prefer the outermost compact dock. That catches Instagram's
-                // divider/background wrapper as well as the immediate tab parent.
-                best = group;
-            }
-
-            Object parent = current.getParent();
-            current = parent instanceof View ? (View) parent : null;
-            depth++;
-        }
-        return best;
-    }
-
-    private static int countInteractiveDescendants(ViewGroup group, int depth) {
-        if (depth < 0) return 0;
-        int count = 0;
-        for (int i = 0; i < group.getChildCount(); i++) {
-            View child = group.getChildAt(i);
-            if (child.getVisibility() != View.VISIBLE) continue;
-            if (child.isClickable() || child.isFocusable() || child.getContentDescription() != null) {
-                count++;
-            }
-            if (child instanceof ViewGroup && depth > 0) {
-                count += countInteractiveDescendants((ViewGroup) child, depth - 1);
-            }
-        }
-        return count;
-    }
-
-    private static int bottomGapToDecor(Activity activity, View view) {
-        try {
-            View decor = activity.getWindow() != null ? activity.getWindow().getDecorView() : null;
-            if (decor == null || view == null) return 0;
-
-            int[] decorLocation = new int[2];
-            int[] viewLocation = new int[2];
-            decor.getLocationInWindow(decorLocation);
-            view.getLocationInWindow(viewLocation);
-
-            int decorBottom = decorLocation[1] + decor.getHeight();
-            int viewBottom = viewLocation[1] + view.getHeight();
-            return Math.max(0, decorBottom - viewBottom);
+            return context.getResources().getIdentifier(name, "id", context.getPackageName());
         } catch (Throwable ignored) {
             return 0;
         }
     }
 
-    private static int navigationBarInset(View view) {
-        try {
-            WindowInsets insets = view.getRootWindowInsets();
-            if (insets == null) return 0;
-            if (Build.VERSION.SDK_INT >= 30) {
-                return insets.getInsets(WindowInsets.Type.navigationBars()).bottom;
-            }
-            return insets.getStableInsetBottom();
-        } catch (Throwable ignored) {
-            return 0;
+    private static Activity findActivity(Context context) {
+        Context current = context;
+        while (current != null) {
+            if (current instanceof Activity) return (Activity) current;
+            if (!(current instanceof ContextWrapper)) return null;
+            Context next = ((ContextWrapper) current).getBaseContext();
+            if (next == current) return null;
+            current = next;
         }
+        return null;
     }
 
-    private static int dp(Context context, float value) {
-        return Math.round(value * context.getResources().getDisplayMetrics().density);
+    private static String describeParent(View view) {
+        Object parent = view != null ? view.getParent() : null;
+        if (parent instanceof View) {
+            return parent.getClass().getName();
+        }
+        return String.valueOf(parent);
     }
 
     private static String describeView(Context context, View view) {
-        String idName = "no-id";
+        if (view == null) return "null";
+        StringBuilder out = new StringBuilder(view.getClass().getName());
         try {
-            if (view.getId() != 0 && view.getId() != View.NO_ID) {
-                idName = context.getResources().getResourceEntryName(view.getId());
+            int id = view.getId();
+            if (id != View.NO_ID && id != 0) {
+                out.append("#").append(context.getResources().getResourceEntryName(id));
             }
         } catch (Throwable ignored) {}
-        return view.getClass().getName() + "#" + idName
-                + " (" + view.getWidth() + "x" + view.getHeight() + ")";
+        out.append("(").append(view.getWidth()).append("x").append(view.getHeight()).append(")");
+        return out.toString();
+    }
+
+    private static int dp(Context context, float value) {
+        return Math.max(1, Math.round(
+                value * context.getResources().getDisplayMetrics().density
+        ));
     }
 
     private static boolean isLightTheme(Context context) {
-        int night = context.getResources().getConfiguration().uiMode & Configuration.UI_MODE_NIGHT_MASK;
-        return night != Configuration.UI_MODE_NIGHT_YES;
+        int mode = context.getResources().getConfiguration().uiMode
+                & Configuration.UI_MODE_NIGHT_MASK;
+        return mode != Configuration.UI_MODE_NIGHT_YES;
+    }
+
+    private static boolean hasSelectedState(View view) {
+        if (view == null) return false;
+        if (view.isSelected() || view.isActivated()) return true;
+        if (view instanceof Checkable && ((Checkable) view).isChecked()) return true;
+        if (view instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) view;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                if (hasSelectedState(group.getChildAt(i))) return true;
+            }
+        }
+        return false;
+    }
+
+    private static List<View> visibleNativeTabs(ViewGroup bar) {
+        List<View> tabs = new ArrayList<>();
+        if (bar == null) return tabs;
+
+        // Instagram's actual #tab_bar is a horizontal LinearLayout whose direct children are
+        // feed_tab / clips_tab / direct_tab / search_tab / profile_tab. Preserve that contract
+        // rather than recursively guessing a nested group.
+        for (int i = 0; i < bar.getChildCount(); i++) {
+            View child = bar.getChildAt(i);
+            if (child.getVisibility() == View.VISIBLE
+                    && child.getWidth() > 0
+                    && child.getHeight() > 0) {
+                tabs.add(child);
+            }
+        }
+        return tabs;
+    }
+
+    private static int selectedNativeTabIndex(ViewGroup bar) {
+        List<View> tabs = visibleNativeTabs(bar);
+        for (int i = 0; i < tabs.size(); i++) {
+            if (hasSelectedState(tabs.get(i))) return i;
+        }
+        return -1;
+    }
+
+    private static final class MarginSnapshot {
+        final View view;
+        final String name;
+        final int originalBottomMargin;
+
+        MarginSnapshot(View view, String name, int originalBottomMargin) {
+            this.view = view;
+            this.name = name;
+            this.originalBottomMargin = originalBottomMargin;
+        }
+
+        void applyZeroBottomMargin() {
+            if (!(view.getLayoutParams() instanceof ViewGroup.MarginLayoutParams)) return;
+            ViewGroup.MarginLayoutParams lp =
+                    (ViewGroup.MarginLayoutParams) view.getLayoutParams();
+            lp.bottomMargin = 0;
+            view.setLayoutParams(lp);
+        }
+
+        void restore() {
+            if (!(view.getLayoutParams() instanceof ViewGroup.MarginLayoutParams)) return;
+            ViewGroup.MarginLayoutParams lp =
+                    (ViewGroup.MarginLayoutParams) view.getLayoutParams();
+            lp.bottomMargin = originalBottomMargin;
+            view.setLayoutParams(lp);
+            view.requestLayout();
+        }
     }
 
     private static final class State {
         final ViewGroup bar;
-        final LiquidGlassContainer wrapper;
-        final ViewGroup originalParent;
-        final int originalIndex;
-        final ViewGroup.LayoutParams originalLayoutParams;
-        final Drawable originalBackground;
-        final float originalElevation;
-        final int originalPaddingStart;
-        final int originalPaddingTop;
-        final int originalPaddingEnd;
-        final int originalPaddingBottom;
-        final int originalParentVisibility;
-        final boolean collapsedOriginalParent;
-        final ViewGroup collapsedDock;
-        final int collapsedDockVisibility;
-        final ViewGroup detachedDockParent;
-        final int detachedDockIndex;
-        final ViewGroup.LayoutParams detachedDockLayoutParams;
+        final FrameLayout host;
+        final GlassLayer layer;
+        final View dragHandle;
+        final FrameLayout.LayoutParams originalBarLayoutParams;
+        final Drawable originalBarBackground;
+        final float originalBarElevation;
+        final float originalBarTranslationZ;
+        final boolean originalClipChildren;
+        final boolean originalClipToPadding;
+        final View shadow;
+        final int originalShadowVisibility;
+        final List<MarginSnapshot> reservedContent;
 
         State(
                 ViewGroup bar,
-                LiquidGlassContainer wrapper,
-                ViewGroup originalParent,
-                int originalIndex,
-                ViewGroup.LayoutParams originalLayoutParams,
-                Drawable originalBackground,
-                float originalElevation,
-                int originalPaddingStart,
-                int originalPaddingTop,
-                int originalPaddingEnd,
-                int originalPaddingBottom,
-                int originalParentVisibility,
-                boolean collapsedOriginalParent,
-                ViewGroup collapsedDock,
-                int collapsedDockVisibility,
-                ViewGroup detachedDockParent,
-                int detachedDockIndex,
-                ViewGroup.LayoutParams detachedDockLayoutParams
+                FrameLayout host,
+                GlassLayer layer,
+                View dragHandle,
+                FrameLayout.LayoutParams originalBarLayoutParams,
+                Drawable originalBarBackground,
+                float originalBarElevation,
+                float originalBarTranslationZ,
+                boolean originalClipChildren,
+                boolean originalClipToPadding,
+                View shadow,
+                int originalShadowVisibility,
+                List<MarginSnapshot> reservedContent
         ) {
             this.bar = bar;
-            this.wrapper = wrapper;
-            this.originalParent = originalParent;
-            this.originalIndex = originalIndex;
-            this.originalLayoutParams = originalLayoutParams;
-            this.originalBackground = originalBackground;
-            this.originalElevation = originalElevation;
-            this.originalPaddingStart = originalPaddingStart;
-            this.originalPaddingTop = originalPaddingTop;
-            this.originalPaddingEnd = originalPaddingEnd;
-            this.originalPaddingBottom = originalPaddingBottom;
-            this.originalParentVisibility = originalParentVisibility;
-            this.collapsedOriginalParent = collapsedOriginalParent;
-            this.collapsedDock = collapsedDock;
-            this.collapsedDockVisibility = collapsedDockVisibility;
-            this.detachedDockParent = detachedDockParent;
-            this.detachedDockIndex = detachedDockIndex;
-            this.detachedDockLayoutParams = detachedDockLayoutParams;
+            this.host = host;
+            this.layer = layer;
+            this.dragHandle = dragHandle;
+            this.originalBarLayoutParams = originalBarLayoutParams;
+            this.originalBarBackground = originalBarBackground;
+            this.originalBarElevation = originalBarElevation;
+            this.originalBarTranslationZ = originalBarTranslationZ;
+            this.originalClipChildren = originalClipChildren;
+            this.originalClipToPadding = originalClipToPadding;
+            this.shadow = shadow;
+            this.originalShadowVisibility = originalShadowVisibility;
+            this.reservedContent = reservedContent;
+        }
+
+        boolean isValid() {
+            return bar.isAttachedToWindow()
+                    && bar.getParent() == host
+                    && layer.getParent() == host
+                    && dragHandle.getParent() == host;
         }
     }
 
-    private static final class LiquidGlassContainer extends FrameLayout {
+    private static final class GlassLayer extends FrameLayout {
         private final FrameLayout captureRoot;
         private final ViewGroup nativeBar;
+        private final View nativeShadow;
+
         private final BackdropView backdropView;
         private final View surfaceTint;
         private final BackdropView selectionLens;
-        private final View dragHandle;
         private final GradientDrawable lensSurfaceDrawable;
-        private final float radiusPx;
+
         private final ViewTreeObserver.OnPreDrawListener preDrawListener;
 
+        private View dragHandle;
         private Bitmap snapshot;
         private long lastCaptureAt;
         private long lastSelectionAt;
         private boolean listenerAttached;
+
+        private int visualSelectedTabIndex = -1;
         private boolean draggingLens;
         private float dragStartRawX;
         private float dragStartLensX;
+        private float dragDownRawX;
         private long lensSettleUntil;
-        private VelocityTracker lensVelocityTracker;
+        private VelocityTracker velocityTracker;
 
-        // Instagram 449 does not reliably keep isSelected()/isActivated() on tab children after
-        // a navigation switch. Keep our own visual selection state so the liquid capsule does not
-        // disappear just because Instagram rebinds/recreates its tab views.
-        private int visualSelectedTabIndex = -1;
-        private float nativeTapDownX;
-        private float nativeTapDownY;
-        private boolean nativeTapCandidate;
-
-        LiquidGlassContainer(Context context, FrameLayout captureRoot, ViewGroup nativeBar) {
+        GlassLayer(Context context, FrameLayout captureRoot, ViewGroup nativeBar, View nativeShadow) {
             super(context);
             this.captureRoot = captureRoot;
             this.nativeBar = nativeBar;
-            this.radiusPx = dp(context, 30);
+            this.nativeShadow = nativeShadow;
 
+            setWillNotDraw(false);
             setClipChildren(false);
             setClipToPadding(false);
-            setElevation(dp(context, 8));
-            // Do not clip the whole wrapper: Kyant's selected lens grows beyond the 56dp row
-            // while pressed. Clip only the main backdrop itself so the pill stays rounded while
-            // the gliding lens is free to scale/stretch outside those bounds.
-            setClipToOutline(false);
+            setClickable(false);
+            setFocusable(false);
+
+            float radius = dp(context, 30);
 
             backdropView = new BackdropView(context, false);
             backdropView.setOutlineProvider(new ViewOutlineProvider() {
                 @Override
                 public void getOutline(View view, android.graphics.Outline outline) {
-                    outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), radiusPx);
+                    outline.setRoundRect(
+                            0, 0, view.getWidth(), view.getHeight(),
+                            Math.min(radius, view.getHeight() / 2f)
+                    );
                 }
             });
             backdropView.setClipToOutline(true);
@@ -627,8 +628,8 @@ public final class FloatingIosBottomNavHook {
             surfaceTint = new View(context);
             GradientDrawable surface = new GradientDrawable();
             surface.setShape(GradientDrawable.RECTANGLE);
-            surface.setCornerRadius(radiusPx);
-            surface.setColor(isLightTheme(context) ? 0x66FAFAFA : 0x66121212);
+            surface.setCornerRadius(radius);
+            surface.setColor(isLightTheme(context) ? 0x42F8F8F8 : 0x42121212);
             surfaceTint.setBackground(surface);
             addView(surfaceTint, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -643,18 +644,19 @@ public final class FloatingIosBottomNavHook {
             selectionLens.setOutlineProvider(new ViewOutlineProvider() {
                 @Override
                 public void getOutline(View view, android.graphics.Outline outline) {
-                    outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), view.getHeight() / 2f);
+                    outline.setRoundRect(
+                            0, 0, view.getWidth(), view.getHeight(),
+                            view.getHeight() / 2f
+                    );
                 }
             });
             selectionLens.setClipToOutline(true);
 
-            // Kyant's LiquidBottomTabs uses a very light selected surface at rest (10% black in
-            // light mode / 10% white in dark mode), then fades toward a ~3% black surface while
-            // actively dragging. Keeping this as FOREGROUND is important: the sampled backdrop is
-            // opaque, so a background tint would disappear underneath it.
             lensSurfaceDrawable = new GradientDrawable();
             lensSurfaceDrawable.setCornerRadius(dp(context, 32));
-            lensSurfaceDrawable.setColor(isLightTheme(context) ? 0x14000000 : 0x18FFFFFF);
+            lensSurfaceDrawable.setColor(
+                    isLightTheme(context) ? 0x14000000 : 0x18FFFFFF
+            );
             lensSurfaceDrawable.setStroke(
                     dp(context, 1),
                     isLightTheme(context) ? 0x26000000 : 0x4DFFFFFF
@@ -662,20 +664,13 @@ public final class FloatingIosBottomNavHook {
             selectionLens.setForeground(lensSurfaceDrawable);
             addView(selectionLens, new FrameLayout.LayoutParams(1, 1));
 
-            // The visual lens stays BEHIND Instagram's real tab icons. A transparent handle sits
-            // above the native bar and mirrors the lens bounds so dragging never hides/replaces
-            // Instagram's own icon, badge, accessibility or selected-state rendering.
-            dragHandle = new View(context);
-            dragHandle.setVisibility(View.INVISIBLE);
-            dragHandle.setBackgroundColor(Color.TRANSPARENT);
-            dragHandle.setClickable(true);
-            dragHandle.setOnTouchListener((v, event) -> handleLensTouch(event));
-            addView(dragHandle, new FrameLayout.LayoutParams(1, 1));
-
             GradientDrawable border = new GradientDrawable();
             border.setColor(Color.TRANSPARENT);
-            border.setCornerRadius(radiusPx);
-            border.setStroke(dp(context, 1), isLightTheme(context) ? 0x30000000 : 0x55FFFFFF);
+            border.setCornerRadius(radius);
+            border.setStroke(
+                    dp(context, 1),
+                    isLightTheme(context) ? 0x30000000 : 0x55FFFFFF
+            );
             setForeground(border);
 
             preDrawListener = () -> {
@@ -685,78 +680,34 @@ public final class FloatingIosBottomNavHook {
                 if (getVisibility() != wantedVisibility) {
                     setVisibility(wantedVisibility);
                 }
+                if (dragHandle != null && dragHandle.getVisibility() != wantedVisibility) {
+                    dragHandle.setVisibility(wantedVisibility);
+                }
 
                 long now = SystemClock.uptimeMillis();
-                if (nativeVisible && getAlpha() > 0f
+                if (nativeVisible
                         && now - lastCaptureAt >= CAPTURE_INTERVAL_MS) {
                     lastCaptureAt = now;
                     captureBackdrop();
                 }
-                if (now - lastSelectionAt >= SELECTION_INTERVAL_MS) {
+
+                if (nativeVisible
+                        && !draggingLens
+                        && now - lastSelectionAt >= SELECTION_INTERVAL_MS) {
                     lastSelectionAt = now;
-                    updateSelectionLens();
+                    syncSelection(true);
                 }
                 return true;
             };
         }
 
-        @Override
-        public boolean dispatchTouchEvent(MotionEvent event) {
-            // Observe taps on Instagram's REAL tab bar without consuming them. This gives the
-            // liquid lens an authoritative target even when Instagram's selected/activated flags
-            // disappear during a tab rebind.
-            final int action = event.getActionMasked();
-            final boolean wasDraggingLens = draggingLens;
-
-            if (action == MotionEvent.ACTION_DOWN && !draggingLens) {
-                nativeTapDownX = event.getX();
-                nativeTapDownY = event.getY();
-                nativeTapCandidate = true;
-            } else if (action == MotionEvent.ACTION_MOVE && nativeTapCandidate) {
-                float dx = event.getX() - nativeTapDownX;
-                float dy = event.getY() - nativeTapDownY;
-                float slop = dp(getContext(), 10);
-                if (dx * dx + dy * dy > slop * slop) {
-                    nativeTapCandidate = false;
-                }
-            }
-
-            boolean handled = super.dispatchTouchEvent(event);
-
-            if (action == MotionEvent.ACTION_UP) {
-                if (nativeTapCandidate && !wasDraggingLens) {
-                    final float upX = event.getX();
-                    post(() -> {
-                        List<View> tabs = visibleTabs(findBestTabGroup(nativeBar));
-                        if (tabs.isEmpty()) return;
-                        int targetIndex = nearestTabIndex(tabs, upX);
-                        setVisualSelectedTab(targetIndex, true);
-                    });
-                }
-                nativeTapCandidate = false;
-            } else if (action == MotionEvent.ACTION_CANCEL) {
-                nativeTapCandidate = false;
-            }
-
-            return handled;
-        }
-
-        void addNativeBar(ViewGroup bar) {
-            // The outer container is explicitly locked to Instagram's already-measured native
-            // bar height. MATCH_PARENT here is therefore safe and prevents the background glass
-            // layers from forcing a WRAP_CONTENT FrameLayout to expand to the full viewport.
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    ViewGroup.LayoutParams.MATCH_PARENT,
-                    Gravity.CENTER
-            );
-            addView(bar, lp);
-            // Android elevation/Z can override insertion order. Keep Instagram's real icons,
-            // avatar and badges above the liquid lens, with only the transparent gesture handle
-            // above the native bar.
-            bar.setTranslationZ(dp(getContext(), 4));
-            dragHandle.setTranslationZ(dp(getContext(), 8));
-            dragHandle.bringToFront();
+        void attachDragHandle(View handle) {
+            this.dragHandle = handle;
+            handle.setOnTouchListener((v, event) -> handleLensTouch(event));
+            post(() -> {
+                syncSelection(false);
+                updateDragHandleFromLens();
+            });
         }
 
         @Override
@@ -773,23 +724,55 @@ public final class FloatingIosBottomNavHook {
 
         void dispose() {
             detachListener();
+            if (velocityTracker != null) {
+                velocityTracker.recycle();
+                velocityTracker = null;
+            }
             if (snapshot != null) {
                 snapshot.recycle();
                 snapshot = null;
             }
             backdropView.setSnapshot(null, 0);
             selectionLens.setSnapshot(null, 0);
-            if (lensVelocityTracker != null) {
-                lensVelocityTracker.recycle();
-                lensVelocityTracker = null;
-            }
         }
 
         void requestCapture() {
             post(() -> {
                 captureBackdrop();
-                updateSelectionLens();
+                syncSelection(false);
             });
+        }
+
+        void syncSelection(boolean animate) {
+            List<View> tabs = visibleNativeTabs(nativeBar);
+            if (tabs.size() < 3) return;
+
+            int selected = selectedNativeTabIndex(nativeBar);
+            if (selected >= 0 && selected < tabs.size()) {
+                if (visualSelectedTabIndex != selected) {
+                    visualSelectedTabIndex = selected;
+                    moveLensToTab(tabs.get(selected), animate);
+                } else if (selectionLens.getVisibility() != View.VISIBLE) {
+                    moveLensToTab(tabs.get(selected), false);
+                } else {
+                    updateDragHandleFromLens();
+                }
+                return;
+            }
+
+            // Instagram can transiently clear selected flags while it swaps fragments. Never hide
+            // or reset the lens in that interval. Keep the last native index until selection
+            // becomes authoritative again.
+            if (visualSelectedTabIndex >= 0 && visualSelectedTabIndex < tabs.size()) {
+                if (selectionLens.getVisibility() != View.VISIBLE) {
+                    moveLensToTab(tabs.get(visualSelectedTabIndex), false);
+                }
+                return;
+            }
+
+            // First frame only: choose Home if Instagram has not marked a selection yet.
+            visualSelectedTabIndex = 0;
+            moveLensToTab(tabs.get(0), false);
         }
 
         private void attachListener() {
@@ -805,7 +788,9 @@ public final class FloatingIosBottomNavHook {
             if (!listenerAttached) return;
             try {
                 ViewTreeObserver observer = captureRoot.getViewTreeObserver();
-                if (observer.isAlive()) observer.removeOnPreDrawListener(preDrawListener);
+                if (observer.isAlive()) {
+                    observer.removeOnPreDrawListener(preDrawListener);
+                }
             } catch (Throwable ignored) {}
             listenerAttached = false;
         }
@@ -816,16 +801,20 @@ public final class FloatingIosBottomNavHook {
             if (width <= 1 || height <= 1 || !isAttachedToWindow()) return;
 
             try {
-                if (snapshot == null || snapshot.getWidth() != width || snapshot.getHeight() != height) {
+                if (snapshot == null
+                        || snapshot.getWidth() != width
+                        || snapshot.getHeight() != height) {
                     if (snapshot != null) snapshot.recycle();
-                    snapshot = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888);
+                    snapshot = Bitmap.createBitmap(
+                            width, height, Bitmap.Config.ARGB_8888
+                    );
                 } else {
                     snapshot.eraseColor(Color.TRANSPARENT);
                 }
 
                 Canvas canvas = new Canvas(snapshot);
-                int[] wrapperLocation = new int[2];
-                getLocationInWindow(wrapperLocation);
+                int[] layerLocation = new int[2];
+                getLocationInWindow(layerLocation);
 
                 Drawable rootBackground = captureRoot.getBackground();
                 if (rootBackground != null) {
@@ -833,124 +822,147 @@ public final class FloatingIosBottomNavHook {
                     captureRoot.getLocationInWindow(rootLocation);
                     int save = canvas.save();
                     canvas.translate(
-                            rootLocation[0] - wrapperLocation[0],
-                            rootLocation[1] - wrapperLocation[1]
+                            rootLocation[0] - layerLocation[0],
+                            rootLocation[1] - layerLocation[1]
                     );
                     rootBackground.draw(canvas);
                     canvas.restoreToCount(save);
                 } else {
-                    canvas.drawColor(isLightTheme(getContext()) ? Color.WHITE : Color.BLACK);
+                    canvas.drawColor(
+                            isLightTheme(getContext()) ? Color.WHITE : Color.BLACK
+                    );
                 }
 
                 int[] childLocation = new int[2];
                 for (int i = 0; i < captureRoot.getChildCount(); i++) {
                     View child = captureRoot.getChildAt(i);
-                    if (child == this || child.getVisibility() != View.VISIBLE || child.getAlpha() <= 0f) {
+                    if (child == this
+                            || child == nativeBar
+                            || child == dragHandle
+                            || child == nativeShadow
+                            || child.getVisibility() != View.VISIBLE
+                            || child.getAlpha() <= 0f) {
                         continue;
                     }
+
                     child.getLocationInWindow(childLocation);
                     int save = canvas.save();
                     canvas.translate(
-                            childLocation[0] - wrapperLocation[0],
-                            childLocation[1] - wrapperLocation[1]
+                            childLocation[0] - layerLocation[0],
+                            childLocation[1] - layerLocation[1]
                     );
                     child.draw(canvas);
                     canvas.restoreToCount(save);
                 }
 
                 backdropView.setSnapshot(snapshot, 0);
-                selectionLens.setSnapshot(snapshot, Math.round(selectionLens.getX()));
+                selectionLens.setSnapshot(
+                        snapshot,
+                        Math.round(selectionLens.getX())
+                );
             } catch (Throwable t) {
                 ModuleLog.line("(InstaLy | FloatingNav): backdrop capture failed", t);
             }
         }
 
-        private void updateSelectionLens() {
-            ViewGroup tabGroup = findBestTabGroup(nativeBar);
-            if (tabGroup == null) {
-                // A tab switch can transiently rebuild the row. Keep the existing capsule where
-                // it is instead of flashing it off; the next pre-draw will bind to the new row.
-                return;
-            }
+        private void moveLensToTab(View tab, boolean animate) {
+            if (tab == null || tab.getWidth() <= 0 || tab.getHeight() <= 0) return;
 
-            List<View> tabs = visibleTabs(tabGroup);
-            if (tabs.isEmpty()) return;
+            int[] tabLocation = new int[2];
+            int[] layerLocation = new int[2];
+            tab.getLocationInWindow(tabLocation);
+            getLocationInWindow(layerLocation);
 
-            if (visualSelectedTabIndex < 0 || visualSelectedTabIndex >= tabs.size()) {
-                int nativeSelected = selectedTabIndex(tabs);
-                visualSelectedTabIndex = nativeSelected >= 0 ? nativeSelected : 0;
-            }
+            int tabLeft = tabLocation[0] - layerLocation[0];
+            int tabTop = tabLocation[1] - layerLocation[1];
 
-            View selected = tabs.get(Math.max(
-                    0,
-                    Math.min(visualSelectedTabIndex, tabs.size() - 1)
-            ));
-
-            int[] selectedLocation = new int[2];
-            int[] wrapperLocation = new int[2];
-            selected.getLocationInWindow(selectedLocation);
-            getLocationInWindow(wrapperLocation);
-
-            int left = selectedLocation[0] - wrapperLocation[0];
-            int top = selectedLocation[1] - wrapperLocation[1];
-            int width = selected.getWidth();
-            int height = selected.getHeight();
+            int horizontalInset = Math.min(dp(getContext(), 6), tab.getWidth() / 8);
             int verticalInset = dp(getContext(), 4);
+            int lensWidth = Math.max(
+                    dp(getContext(), 48),
+                    tab.getWidth() - horizontalInset * 2
+            );
+            int lensHeight = Math.max(
+                    dp(getContext(), 42),
+                    tab.getHeight() - verticalInset * 2
+            );
 
-            if (width <= 0 || height <= 0) {
-                hideLens();
-                return;
-            }
+            float targetX = tabLeft + horizontalInset;
+            int targetTop = Math.max(0, tabTop + verticalInset);
 
-            int lensHeight = Math.max(dp(getContext(), 42), height - verticalInset * 2);
-
-            FrameLayout.LayoutParams lensLp = (FrameLayout.LayoutParams) selectionLens.getLayoutParams();
-            lensLp.width = width;
+            FrameLayout.LayoutParams lensLp =
+                    (FrameLayout.LayoutParams) selectionLens.getLayoutParams();
+            lensLp.width = lensWidth;
             lensLp.height = lensHeight;
             lensLp.leftMargin = 0;
-            lensLp.topMargin = Math.max(0, top + verticalInset);
+            lensLp.topMargin = targetTop;
             selectionLens.setLayoutParams(lensLp);
+            selectionLens.setSnapshot(snapshot, Math.round(targetX));
+            selectionLens.setVisibility(View.VISIBLE);
+            selectionLens.setAlpha(1f);
 
-            FrameLayout.LayoutParams handleLp = (FrameLayout.LayoutParams) dragHandle.getLayoutParams();
-            handleLp.width = width;
-            handleLp.height = lensHeight;
-            handleLp.leftMargin = 0;
-            handleLp.topMargin = lensLp.topMargin;
-            dragHandle.setLayoutParams(handleLp);
+            selectionLens.animate().cancel();
 
-            // While the user is dragging (or while the release spring is settling), never fight
-            // the finger/spring by snapping back to Instagram's selected state every pre-draw.
             long now = SystemClock.uptimeMillis();
-            if (draggingLens || now < lensSettleUntil) {
-                selectionLens.setSnapshot(snapshot, Math.round(selectionLens.getX()));
+            if (animate && selectionLens.getWidth() > 0) {
+                lensSettleUntil = now + 320L;
+                selectionLens.animate()
+                        .x(targetX)
+                        .alpha(1f)
+                        .scaleX(1f)
+                        .scaleY(1f)
+                        .setDuration(240L)
+                        .setInterpolator(new OvershootInterpolator(0.42f))
+                        .withEndAction(() -> {
+                            lensSettleUntil = 0L;
+                            selectionLens.setInteractionActive(false);
+                            updateLensSurface(false);
+                            updateDragHandleFromLens();
+                            postDelayed(this::captureBackdrop, 32L);
+                        })
+                        .start();
+            } else {
+                selectionLens.setX(targetX);
+                selectionLens.setScaleX(1f);
+                selectionLens.setScaleY(1f);
+                lensSettleUntil = 0L;
+            }
+
+            updateDragHandleFromLens();
+        }
+
+        private void updateDragHandleFromLens() {
+            if (dragHandle == null
+                    || selectionLens.getVisibility() != View.VISIBLE
+                    || selectionLens.getWidth() <= 0
+                    || selectionLens.getHeight() <= 0) {
                 return;
             }
 
-            selectionLens.setSnapshot(snapshot, left);
+            int[] layerLocation = new int[2];
+            int[] hostLocation = new int[2];
+            getLocationInWindow(layerLocation);
+            captureRoot.getLocationInWindow(hostLocation);
 
-            if (selectionLens.getVisibility() != View.VISIBLE) {
-                selectionLens.setX(left);
-                dragHandle.setX(left);
-                selectionLens.setAlpha(0f);
-                selectionLens.setVisibility(View.VISIBLE);
-                dragHandle.setVisibility(View.VISIBLE);
-                selectionLens.animate().alpha(1f).setDuration(150L).start();
-            } else if (Math.abs(selectionLens.getX() - left) > 1f) {
-                selectionLens.animate()
-                        .x(left)
-                        .alpha(1f)
-                        .setDuration(220L)
-                        .setInterpolator(new OvershootInterpolator(0.35f))
-                        .start();
-                dragHandle.animate()
-                        .x(left)
-                        .setDuration(220L)
-                        .setInterpolator(new OvershootInterpolator(0.35f))
-                        .start();
-            } else {
-                dragHandle.setX(left);
-                dragHandle.setVisibility(View.VISIBLE);
-            }
+            FrameLayout.LayoutParams lp =
+                    dragHandle.getLayoutParams() instanceof FrameLayout.LayoutParams
+                            ? (FrameLayout.LayoutParams) dragHandle.getLayoutParams()
+                            : new FrameLayout.LayoutParams(1, 1);
+            lp.width = selectionLens.getWidth();
+            lp.height = selectionLens.getHeight();
+            lp.gravity = Gravity.NO_GRAVITY;
+            lp.leftMargin = 0;
+            lp.topMargin = 0;
+            dragHandle.setLayoutParams(lp);
+
+            dragHandle.setX(
+                    layerLocation[0] - hostLocation[0] + selectionLens.getX()
+            );
+            dragHandle.setY(
+                    layerLocation[1] - hostLocation[1] + selectionLens.getY()
+            );
+            dragHandle.setVisibility(View.VISIBLE);
+            dragHandle.bringToFront();
         }
 
         private boolean handleLensTouch(MotionEvent event) {
@@ -961,49 +973,55 @@ public final class FloatingIosBottomNavHook {
                     draggingLens = true;
                     lensSettleUntil = 0L;
                     selectionLens.animate().cancel();
-                    dragHandle.animate().cancel();
 
                     dragStartRawX = event.getRawX();
+                    dragDownRawX = event.getRawX();
                     dragStartLensX = selectionLens.getX();
 
-                    if (lensVelocityTracker != null) lensVelocityTracker.recycle();
-                    lensVelocityTracker = VelocityTracker.obtain();
-                    lensVelocityTracker.addMovement(event);
+                    if (velocityTracker != null) velocityTracker.recycle();
+                    velocityTracker = VelocityTracker.obtain();
+                    velocityTracker.addMovement(event);
 
                     selectionLens.setInteractionActive(true);
                     updateLensSurface(true);
-
-                    // Keep Kyant's elastic feel without letting the lens balloon over adjacent
-                    // Instagram tabs on compact phone widths.
                     selectionLens.animate()
-                            .scaleX(1.18f)
-                            .scaleY(1.18f)
-                            .setDuration(110L)
+                            .scaleX(1.16f)
+                            .scaleY(1.16f)
+                            .setDuration(100L)
                             .start();
                     return true;
                 }
 
                 case MotionEvent.ACTION_MOVE: {
                     if (!draggingLens) return false;
-                    if (lensVelocityTracker != null) {
-                        lensVelocityTracker.addMovement(event);
-                        lensVelocityTracker.computeCurrentVelocity(1000);
+                    if (velocityTracker != null) {
+                        velocityTracker.addMovement(event);
+                        velocityTracker.computeCurrentVelocity(1000);
                     }
 
-                    float rawTarget = dragStartLensX + (event.getRawX() - dragStartRawX);
-                    float minX = 0f;
-                    float maxX = Math.max(0f, getWidth() - selectionLens.getWidth());
-                    float targetX = Math.max(minX, Math.min(maxX, rawTarget));
+                    float rawTarget = dragStartLensX
+                            + (event.getRawX() - dragStartRawX);
+                    float maxX = Math.max(
+                            0f,
+                            getWidth() - selectionLens.getWidth()
+                    );
+                    float targetX = Math.max(0f, Math.min(maxX, rawTarget));
 
                     selectionLens.setX(targetX);
-                    dragHandle.setX(targetX);
                     selectionLens.setSnapshot(snapshot, Math.round(targetX));
 
-                    // A small velocity deformation mirrors Kyant's gliding/stretching lens.
-                    float vx = lensVelocityTracker != null ? lensVelocityTracker.getXVelocity() : 0f;
-                    float stretch = Math.min(0.10f, Math.abs(vx) / 12000f);
-                    selectionLens.setScaleX(1.18f * (1f + stretch));
-                    selectionLens.setScaleY(1.18f * (1f - stretch * 0.35f));
+                    float vx = velocityTracker != null
+                            ? velocityTracker.getXVelocity()
+                            : 0f;
+                    float stretch = Math.min(
+                            0.08f,
+                            Math.abs(vx) / 14000f
+                    );
+                    selectionLens.setScaleX(1.16f * (1f + stretch));
+                    selectionLens.setScaleY(
+                            1.16f * (1f - stretch * 0.30f)
+                    );
+                    updateDragHandleFromLens();
                     return true;
                 }
 
@@ -1013,62 +1031,58 @@ public final class FloatingIosBottomNavHook {
                     draggingLens = false;
 
                     float vx = 0f;
-                    if (lensVelocityTracker != null) {
-                        lensVelocityTracker.addMovement(event);
-                        lensVelocityTracker.computeCurrentVelocity(1000);
-                        vx = lensVelocityTracker.getXVelocity();
-                        lensVelocityTracker.recycle();
-                        lensVelocityTracker = null;
+                    if (velocityTracker != null) {
+                        velocityTracker.addMovement(event);
+                        velocityTracker.computeCurrentVelocity(1000);
+                        vx = velocityTracker.getXVelocity();
+                        velocityTracker.recycle();
+                        velocityTracker = null;
                     }
 
-                    List<View> tabs = visibleTabs(findBestTabGroup(nativeBar));
+                    List<View> tabs = visibleNativeTabs(nativeBar);
                     if (tabs.isEmpty()) {
-                        finishLensInteraction(selectionLens.getX());
+                        selectionLens.setInteractionActive(false);
+                        updateLensSurface(false);
+                        selectionLens.animate()
+                                .scaleX(1f)
+                                .scaleY(1f)
+                                .setDuration(160L)
+                                .start();
                         return true;
                     }
 
+                    boolean wasTap = Math.abs(event.getRawX() - dragDownRawX)
+                            < dp(getContext(), 8);
+
                     float projectedCenter = selectionLens.getX()
                             + selectionLens.getWidth() / 2f
-                            + vx * 0.085f;
+                            + (wasTap ? 0f : vx * 0.075f);
 
-                    int targetIndex;
-                    if (event.getActionMasked() == MotionEvent.ACTION_CANCEL) {
-                        targetIndex = selectedTabIndex(tabs);
-                        if (targetIndex < 0) {
-                            targetIndex = nearestTabIndex(tabs, projectedCenter);
-                        }
-                    } else {
-                        targetIndex = nearestTabIndex(tabs, projectedCenter);
+                    int targetIndex = nearestTabIndex(tabs, projectedCenter);
+                    if (event.getActionMasked() == MotionEvent.ACTION_CANCEL
+                            && visualSelectedTabIndex >= 0
+                            && visualSelectedTabIndex < tabs.size()) {
+                        targetIndex = visualSelectedTabIndex;
                     }
 
-                    targetIndex = Math.max(0, Math.min(tabs.size() - 1, targetIndex));
+                    targetIndex = Math.max(
+                            0,
+                            Math.min(tabs.size() - 1, targetIndex)
+                    );
                     visualSelectedTabIndex = targetIndex;
-                    View targetTab = tabs.get(targetIndex);
-                    float targetX = tabXInWrapper(targetTab);
+                    View target = tabs.get(targetIndex);
 
-                    // Keep the "pressed glass" shader alive until the spring reaches its tab.
-                    lensSettleUntil = SystemClock.uptimeMillis() + 420L;
-                    selectionLens.animate()
-                            .x(targetX)
-                            .scaleX(1f)
-                            .scaleY(1f)
-                            .setDuration(310L)
-                            .setInterpolator(new OvershootInterpolator(0.62f))
-                            .withEndAction(() -> {
-                                selectionLens.setInteractionActive(false);
-                                updateLensSurface(false);
-                                lensSettleUntil = 0L;
-                                postDelayed(this::requestCapture, 32L);
-                            })
-                            .start();
-                    dragHandle.animate()
-                            .x(targetX)
-                            .setDuration(310L)
-                            .setInterpolator(new OvershootInterpolator(0.62f))
-                            .start();
+                    moveLensToTab(target, true);
 
                     if (event.getActionMasked() != MotionEvent.ACTION_CANCEL) {
-                        performRealTabClick(targetTab);
+                        try {
+                            target.performClick();
+                        } catch (Throwable t) {
+                            ModuleLog.line(
+                                    "(InstaLy | FloatingNav): native tab click failed",
+                                    t
+                            );
+                        }
                     }
                     return true;
                 }
@@ -1078,132 +1092,19 @@ public final class FloatingIosBottomNavHook {
             }
         }
 
-        private void finishLensInteraction(float x) {
-            lensSettleUntil = SystemClock.uptimeMillis() + 220L;
-            selectionLens.animate()
-                    .x(x)
-                    .scaleX(1f)
-                    .scaleY(1f)
-                    .setDuration(180L)
-                    .withEndAction(() -> {
-                        selectionLens.setInteractionActive(false);
-                        updateLensSurface(false);
-                        lensSettleUntil = 0L;
-                    })
-                    .start();
-        }
-
-        private void updateLensSurface(boolean pressed) {
-            int fill = pressed
-                    ? 0x08000000
-                    : (isLightTheme(getContext()) ? 0x1A000000 : 0x1AFFFFFF);
-            int stroke = pressed
-                    ? (isLightTheme(getContext()) ? 0x40000000 : 0x66FFFFFF)
-                    : (isLightTheme(getContext()) ? 0x26000000 : 0x4DFFFFFF);
-            lensSurfaceDrawable.setColor(fill);
-            lensSurfaceDrawable.setStroke(dp(getContext(), 1), stroke);
-            selectionLens.invalidate();
-        }
-
-        private List<View> visibleTabs(ViewGroup tabGroup) {
-            List<View> tabs = new ArrayList<>();
-            if (tabGroup == null) return tabs;
-            for (int i = 0; i < tabGroup.getChildCount(); i++) {
-                View child = tabGroup.getChildAt(i);
-                if (child.getVisibility() == View.VISIBLE && child.getWidth() > 0) {
-                    tabs.add(child);
-                }
-            }
-            return tabs;
-        }
-
-        private void setVisualSelectedTab(int index, boolean animate) {
-            List<View> tabs = visibleTabs(findBestTabGroup(nativeBar));
-            if (tabs.isEmpty()) return;
-
-            int clamped = Math.max(0, Math.min(index, tabs.size() - 1));
-            boolean changed = visualSelectedTabIndex != clamped;
-            visualSelectedTabIndex = clamped;
-            View target = tabs.get(clamped);
-            if (changed) {
-                ModuleLog.line("(InstaLy | FloatingNav): visual tab -> " + clamped);
-            }
-
-            int[] targetLocation = new int[2];
-            int[] wrapperLocation = new int[2];
-            target.getLocationInWindow(targetLocation);
-            getLocationInWindow(wrapperLocation);
-
-            float targetX = targetLocation[0] - wrapperLocation[0];
-            int top = targetLocation[1] - wrapperLocation[1];
-            int width = target.getWidth();
-            int height = target.getHeight();
-            int verticalInset = dp(getContext(), 4);
-
-            if (width <= 0 || height <= 0) return;
-
-            int lensHeight = Math.max(dp(getContext(), 42), height - verticalInset * 2);
-            FrameLayout.LayoutParams lensLp =
-                    (FrameLayout.LayoutParams) selectionLens.getLayoutParams();
-            lensLp.width = width;
-            lensLp.height = lensHeight;
-            lensLp.topMargin = Math.max(0, top + verticalInset);
-            selectionLens.setLayoutParams(lensLp);
-
-            FrameLayout.LayoutParams handleLp =
-                    (FrameLayout.LayoutParams) dragHandle.getLayoutParams();
-            handleLp.width = width;
-            handleLp.height = lensHeight;
-            handleLp.topMargin = lensLp.topMargin;
-            dragHandle.setLayoutParams(handleLp);
-
-            selectionLens.setVisibility(View.VISIBLE);
-            dragHandle.setVisibility(View.VISIBLE);
-            selectionLens.setAlpha(1f);
-            selectionLens.setSnapshot(snapshot, Math.round(targetX));
-
-            selectionLens.animate().cancel();
-            dragHandle.animate().cancel();
-
-            if (animate) {
-                lensSettleUntil = SystemClock.uptimeMillis() + 300L;
-                selectionLens.animate()
-                        .x(targetX)
-                        .alpha(1f)
-                        .scaleX(1f)
-                        .scaleY(1f)
-                        .setDuration(240L)
-                        .setInterpolator(new OvershootInterpolator(0.42f))
-                        .withEndAction(() -> {
-                            lensSettleUntil = 0L;
-                            postDelayed(this::requestCapture, 32L);
-                        })
-                        .start();
-                dragHandle.animate()
-                        .x(targetX)
-                        .setDuration(240L)
-                        .setInterpolator(new OvershootInterpolator(0.42f))
-                        .start();
-            } else {
-                selectionLens.setX(targetX);
-                dragHandle.setX(targetX);
-            }
-        }
-
-        private int selectedTabIndex(List<View> tabs) {
-            for (int i = 0; i < tabs.size(); i++) {
-                if (hasSelectedState(tabs.get(i))) return i;
-            }
-            return -1;
-        }
-
-        private int nearestTabIndex(List<View> tabs, float xCenter) {
+        private int nearestTabIndex(List<View> tabs, float centerX) {
             int best = 0;
             float bestDistance = Float.MAX_VALUE;
+            int[] layerLocation = new int[2];
+            getLocationInWindow(layerLocation);
+
             for (int i = 0; i < tabs.size(); i++) {
                 View tab = tabs.get(i);
-                float center = tabXInWrapper(tab) + tab.getWidth() / 2f;
-                float distance = Math.abs(center - xCenter);
+                int[] tabLocation = new int[2];
+                tab.getLocationInWindow(tabLocation);
+                float tabCenter = tabLocation[0] - layerLocation[0]
+                        + tab.getWidth() / 2f;
+                float distance = Math.abs(tabCenter - centerX);
                 if (distance < bestDistance) {
                     bestDistance = distance;
                     best = i;
@@ -1212,96 +1113,23 @@ public final class FloatingIosBottomNavHook {
             return best;
         }
 
-        private float tabXInWrapper(View tab) {
-            int[] tabLocation = new int[2];
-            int[] wrapperLocation = new int[2];
-            tab.getLocationInWindow(tabLocation);
-            getLocationInWindow(wrapperLocation);
-            return tabLocation[0] - wrapperLocation[0];
-        }
+        private void updateLensSurface(boolean pressed) {
+            int fill = pressed
+                    ? 0x08000000
+                    : (isLightTheme(getContext())
+                    ? 0x14000000
+                    : 0x18FFFFFF);
+            int stroke = pressed
+                    ? (isLightTheme(getContext())
+                    ? 0x40000000
+                    : 0x66FFFFFF)
+                    : (isLightTheme(getContext())
+                    ? 0x26000000
+                    : 0x4DFFFFFF);
 
-        private void performRealTabClick(View tab) {
-            try {
-                if (tab.performClick()) return;
-                View clickable = findClickableDescendant(tab);
-                if (clickable != null) clickable.performClick();
-            } catch (Throwable t) {
-                ModuleLog.line("(InstaLy | FloatingNav): native tab click failed", t);
-            }
-        }
-
-        private View findClickableDescendant(View view) {
-            if (view != null && view.isClickable()) return view;
-            if (!(view instanceof ViewGroup)) return null;
-            ViewGroup group = (ViewGroup) view;
-            for (int i = 0; i < group.getChildCount(); i++) {
-                View hit = findClickableDescendant(group.getChildAt(i));
-                if (hit != null) return hit;
-            }
-            return null;
-        }
-
-        private void hideLens() {
-            dragHandle.setVisibility(View.INVISIBLE);
-            if (selectionLens.getVisibility() == View.VISIBLE) {
-                selectionLens.animate().alpha(0f).setDuration(120L).withEndAction(() ->
-                        selectionLens.setVisibility(View.INVISIBLE)
-                ).start();
-            }
-        }
-
-        private static ViewGroup findBestTabGroup(ViewGroup root) {
-            List<ViewGroup> groups = new ArrayList<>();
-            collectGroups(root, groups, 0);
-            ViewGroup best = null;
-            int bestScore = Integer.MIN_VALUE;
-
-            for (ViewGroup group : groups) {
-                int visible = 0;
-                int selected = 0;
-                int previousCenter = Integer.MIN_VALUE;
-                boolean ordered = true;
-                for (int i = 0; i < group.getChildCount(); i++) {
-                    View child = group.getChildAt(i);
-                    if (child.getVisibility() != View.VISIBLE || child.getWidth() <= 0) continue;
-                    visible++;
-                    if (hasSelectedState(child)) selected++;
-                    int center = child.getLeft() + child.getWidth() / 2;
-                    if (center <= previousCenter) ordered = false;
-                    previousCenter = center;
-                }
-                if (visible < 3 || visible > 7 || !ordered) continue;
-
-                int score = visible * 2;
-                if (selected == 1) score += 8;
-                if (group.getWidth() >= root.getWidth() * 0.7f) score += 4;
-                if (score > bestScore) {
-                    bestScore = score;
-                    best = group;
-                }
-            }
-            return best;
-        }
-
-        private static void collectGroups(View view, List<ViewGroup> out, int depth) {
-            if (!(view instanceof ViewGroup) || depth > 4) return;
-            ViewGroup group = (ViewGroup) view;
-            out.add(group);
-            for (int i = 0; i < group.getChildCount(); i++) {
-                collectGroups(group.getChildAt(i), out, depth + 1);
-            }
-        }
-
-        private static boolean hasSelectedState(View view) {
-            if (view.isSelected() || view.isActivated()) return true;
-            if (view instanceof Checkable && ((Checkable) view).isChecked()) return true;
-            if (view instanceof ViewGroup) {
-                ViewGroup group = (ViewGroup) view;
-                for (int i = 0; i < group.getChildCount(); i++) {
-                    if (hasSelectedState(group.getChildAt(i))) return true;
-                }
-            }
-            return false;
+            lensSurfaceDrawable.setColor(fill);
+            lensSurfaceDrawable.setStroke(dp(getContext(), 1), stroke);
+            selectionLens.invalidate();
         }
     }
 
