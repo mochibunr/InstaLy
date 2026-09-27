@@ -848,7 +848,7 @@ public final class FloatingIosBottomNavHook {
         private float pressScaleY = 1f;
 
         // Native-View analogue of Kyant's LayerBackdrop GraphicsLayer.
-        private RenderNode liveBackdropNode;
+        private Object liveBackdropNode;
         private boolean liveBackdropAvailable;
         private long lastLiveLayerFailureLogAt;
 
@@ -1227,14 +1227,12 @@ public final class FloatingIosBottomNavHook {
 
         private boolean recordLiveBackdrop(int width, int height) {
             try {
-                if (liveBackdropNode == null) {
-                    liveBackdropNode = new RenderNode("InstaLy-LiveBackdrop");
-                }
-                liveBackdropNode.setPosition(0, 0, width, height);
-
-                Canvas canvas = liveBackdropNode.beginRecording(width, height);
-                drawBackdropSource(canvas);
-                liveBackdropNode.endRecording();
+                liveBackdropNode = Api29LiveBackdrop.record(
+                        liveBackdropNode,
+                        width,
+                        height,
+                        this::drawBackdropSource
+                );
 
                 liveBackdropAvailable = true;
                 backdropView.setLiveBackdrop(liveBackdropNode, 0);
@@ -1816,10 +1814,21 @@ public final class FloatingIosBottomNavHook {
         }
     }
 
+    private interface CanvasRecorder {
+        void draw(Canvas canvas);
+    }
+
     private static final class BackdropView extends View {
         private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private final boolean selectionLens;
+
         private Bitmap snapshot;
+        private Object liveBackdropNode;
+        private Bitmap surfacePatch;
+        private Rect surfacePatchDestination;
+        private Bitmap texturePatch;
+        private Rect texturePatchDestination;
+
         private int sampleOffsetX;
         private int configuredWidth = -1;
         private int configuredHeight = -1;
@@ -1834,6 +1843,24 @@ public final class FloatingIosBottomNavHook {
         void setSnapshot(Bitmap bitmap, int sampleOffsetX) {
             this.snapshot = bitmap;
             this.sampleOffsetX = sampleOffsetX;
+            invalidate();
+        }
+
+        void setLiveBackdrop(Object renderNode, int sampleOffsetX) {
+            this.liveBackdropNode = renderNode;
+            this.sampleOffsetX = sampleOffsetX;
+            invalidate();
+        }
+
+        void setSurfacePatch(Bitmap bitmap, Rect destination) {
+            surfacePatch = bitmap;
+            surfacePatchDestination = destination != null ? new Rect(destination) : null;
+            invalidate();
+        }
+
+        void setTexturePatch(Bitmap bitmap, Rect destination) {
+            texturePatch = bitmap;
+            texturePatchDestination = destination != null ? new Rect(destination) : null;
             invalidate();
         }
 
@@ -1864,8 +1891,49 @@ public final class FloatingIosBottomNavHook {
         @Override
         protected void onDraw(Canvas canvas) {
             super.onDraw(canvas);
-            if (snapshot == null || snapshot.isRecycled()) return;
-            canvas.drawBitmap(snapshot, -sampleOffsetX, 0f, paint);
+
+            int save = canvas.save();
+            canvas.translate(-sampleOffsetX, 0f);
+
+            boolean drewLiveLayer = false;
+            if (Build.VERSION.SDK_INT >= 29
+                    && liveBackdropNode != null
+                    && canvas.isHardwareAccelerated()) {
+                try {
+                    Api29LiveBackdrop.draw(canvas, liveBackdropNode);
+                    drewLiveLayer = true;
+                } catch (Throwable ignored) {
+                    drewLiveLayer = false;
+                }
+            }
+
+            if (!drewLiveLayer && snapshot != null && !snapshot.isRecycled()) {
+                canvas.drawBitmap(snapshot, 0f, 0f, paint);
+            }
+
+            if (surfacePatch != null
+                    && !surfacePatch.isRecycled()
+                    && surfacePatchDestination != null) {
+                canvas.drawBitmap(
+                        surfacePatch,
+                        null,
+                        surfacePatchDestination,
+                        paint
+                );
+            }
+
+            if (texturePatch != null
+                    && !texturePatch.isRecycled()
+                    && texturePatchDestination != null) {
+                canvas.drawBitmap(
+                        texturePatch,
+                        null,
+                        texturePatchDestination,
+                        paint
+                );
+            }
+
+            canvas.restoreToCount(save);
         }
 
         private void configureEffect(int width, int height) {
@@ -1889,6 +1957,28 @@ public final class FloatingIosBottomNavHook {
                     } catch (Throwable ignored) {}
                 }
             }
+        }
+    }
+
+    private static final class Api29LiveBackdrop {
+        static Object record(
+                Object existing,
+                int width,
+                int height,
+                CanvasRecorder recorder
+        ) {
+            RenderNode node = existing instanceof RenderNode
+                    ? (RenderNode) existing
+                    : new RenderNode("InstaLy-LiveBackdrop");
+            node.setPosition(0, 0, width, height);
+            Canvas canvas = node.beginRecording(width, height);
+            recorder.draw(canvas);
+            node.endRecording();
+            return node;
+        }
+
+        static void draw(Canvas canvas, Object renderNode) {
+            canvas.drawRenderNode((RenderNode) renderNode);
         }
     }
 
