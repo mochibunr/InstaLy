@@ -1209,14 +1209,200 @@ public final class FloatingIosBottomNavHook {
                     canvas.restoreToCount(save);
                 }
 
-                backdropView.setSnapshot(snapshot, 0);
-                selectionLens.setSnapshot(
-                        snapshot,
-                        Math.round(selectionLens.getX())
-                );
+                publishSnapshot();
+
+                // SurfaceView video is composed by SurfaceFlinger and is intentionally absent from
+                // View.draw(Canvas). Patch the live video pixels into the same backdrop bitmap using
+                // PixelCopy. This is the missing piece for feed/reels video refraction.
+                if (SystemClock.uptimeMillis() - lastPixelCopyAt >= 66L) {
+                    captureIntersectingSurfaceVideo();
+                }
             } catch (Throwable t) {
                 ModuleLog.line("(InstaLy | FloatingNav): backdrop capture failed", t);
             }
+        }
+
+        private void publishSnapshot() {
+            backdropView.setSnapshot(snapshot, 0);
+            selectionLens.setSnapshot(
+                    snapshot,
+                    Math.round(selectionLens.getX())
+            );
+        }
+
+        private void captureIntersectingSurfaceVideo() {
+            if (pixelCopyInFlight || snapshot == null || snapshot.isRecycled()) return;
+
+            int[] layerLocation = new int[2];
+            getLocationInWindow(layerLocation);
+            Rect layerRect = new Rect(
+                    layerLocation[0],
+                    layerLocation[1],
+                    layerLocation[0] + getWidth(),
+                    layerLocation[1] + getHeight()
+            );
+
+            SurfaceView surface = findTopmostIntersectingSurfaceView(captureRoot, layerRect);
+            if (surface == null
+                    || !surface.isAttachedToWindow()
+                    || surface.getWidth() <= 1
+                    || surface.getHeight() <= 1
+                    || surface.getHolder() == null
+                    || surface.getHolder().getSurface() == null
+                    || !surface.getHolder().getSurface().isValid()) {
+                return;
+            }
+
+            int sourceWidth = surface.getWidth();
+            int sourceHeight = surface.getHeight();
+
+            // We only need enough source detail for a ~56dp glass strip. Capping the copy width
+            // avoids allocating a full 1080x2400 video frame every 50-70ms.
+            float scale = Math.min(1f, 720f / Math.max(1, sourceWidth));
+            int copyWidth = Math.max(2, Math.round(sourceWidth * scale));
+            int copyHeight = Math.max(2, Math.round(sourceHeight * scale));
+
+            if (pixelCopyBuffer == null
+                    || pixelCopyBuffer.isRecycled()
+                    || pixelCopyBuffer.getWidth() != copyWidth
+                    || pixelCopyBuffer.getHeight() != copyHeight
+                    || pixelCopySurface != surface) {
+                if (pixelCopyBuffer != null && !pixelCopyBuffer.isRecycled()) {
+                    pixelCopyBuffer.recycle();
+                }
+                pixelCopyBuffer = Bitmap.createBitmap(
+                        copyWidth,
+                        copyHeight,
+                        Bitmap.Config.ARGB_8888
+                );
+                pixelCopySurface = surface;
+            }
+
+            pixelCopyInFlight = true;
+            lastPixelCopyAt = SystemClock.uptimeMillis();
+            Bitmap destination = pixelCopyBuffer;
+
+            try {
+                PixelCopy.request(
+                        surface,
+                        destination,
+                        result -> {
+                            pixelCopyInFlight = false;
+                            if (result != PixelCopy.SUCCESS
+                                    || snapshot == null
+                                    || snapshot.isRecycled()
+                                    || destination.isRecycled()
+                                    || !surface.isAttachedToWindow()) {
+                                if (result != PixelCopy.SUCCESS) {
+                                    long now = SystemClock.uptimeMillis();
+                                    if (now - lastPixelCopyFailureLogAt > 3000L) {
+                                        lastPixelCopyFailureLogAt = now;
+                                        ModuleLog.line(
+                                                "(InstaLy | FloatingNav): video PixelCopy result="
+                                                        + result
+                                        );
+                                    }
+                                }
+                                return;
+                            }
+
+                            overlaySurfaceCopy(surface, destination);
+                            publishSnapshot();
+                        },
+                        mainHandler
+                );
+            } catch (Throwable t) {
+                pixelCopyInFlight = false;
+                long now = SystemClock.uptimeMillis();
+                if (now - lastPixelCopyFailureLogAt > 3000L) {
+                    lastPixelCopyFailureLogAt = now;
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): video PixelCopy failed",
+                            t
+                    );
+                }
+            }
+        }
+
+        private void overlaySurfaceCopy(SurfaceView surface, Bitmap source) {
+            int[] layerLocation = new int[2];
+            int[] surfaceLocation = new int[2];
+            getLocationInWindow(layerLocation);
+            surface.getLocationInWindow(surfaceLocation);
+
+            Rect layerWindow = new Rect(
+                    layerLocation[0],
+                    layerLocation[1],
+                    layerLocation[0] + getWidth(),
+                    layerLocation[1] + getHeight()
+            );
+            Rect surfaceWindow = new Rect(
+                    surfaceLocation[0],
+                    surfaceLocation[1],
+                    surfaceLocation[0] + surface.getWidth(),
+                    surfaceLocation[1] + surface.getHeight()
+            );
+            Rect intersection = new Rect();
+            if (!intersection.setIntersect(layerWindow, surfaceWindow)) return;
+
+            float sx = source.getWidth() / (float) Math.max(1, surface.getWidth());
+            float sy = source.getHeight() / (float) Math.max(1, surface.getHeight());
+
+            Rect src = new Rect(
+                    Math.max(0, Math.round((intersection.left - surfaceWindow.left) * sx)),
+                    Math.max(0, Math.round((intersection.top - surfaceWindow.top) * sy)),
+                    Math.min(source.getWidth(), Math.round((intersection.right - surfaceWindow.left) * sx)),
+                    Math.min(source.getHeight(), Math.round((intersection.bottom - surfaceWindow.top) * sy))
+            );
+            Rect dst = new Rect(
+                    intersection.left - layerWindow.left,
+                    intersection.top - layerWindow.top,
+                    intersection.right - layerWindow.left,
+                    intersection.bottom - layerWindow.top
+            );
+
+            if (src.width() <= 0 || src.height() <= 0 || dst.width() <= 0 || dst.height() <= 0) {
+                return;
+            }
+
+            Canvas canvas = new Canvas(snapshot);
+            Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+            canvas.drawBitmap(source, src, dst, paint);
+        }
+
+        private SurfaceView findTopmostIntersectingSurfaceView(View root, Rect layerRect) {
+            if (root == null
+                    || root == this
+                    || root == nativeBar
+                    || root == dragHandle
+                    || root == nativeShadow
+                    || root.getVisibility() != View.VISIBLE
+                    || root.getAlpha() <= 0f) {
+                return null;
+            }
+
+            if (root instanceof SurfaceView) {
+                int[] location = new int[2];
+                root.getLocationInWindow(location);
+                Rect rect = new Rect(
+                        location[0],
+                        location[1],
+                        location[0] + root.getWidth(),
+                        location[1] + root.getHeight()
+                );
+                return Rect.intersects(layerRect, rect) ? (SurfaceView) root : null;
+            }
+
+            if (root instanceof ViewGroup) {
+                ViewGroup group = (ViewGroup) root;
+                // Walk back-to-front so the visually topmost active video wins.
+                for (int i = group.getChildCount() - 1; i >= 0; i--) {
+                    SurfaceView found =
+                            findTopmostIntersectingSurfaceView(group.getChildAt(i), layerRect);
+                    if (found != null) return found;
+                }
+            }
+            return null;
         }
 
         private void moveLensToTab(View tab, boolean animate) {
