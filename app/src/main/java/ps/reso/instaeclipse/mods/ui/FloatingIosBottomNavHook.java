@@ -924,6 +924,7 @@ public final class FloatingIosBottomNavHook {
         private long lastPixelCopyFailureLogAt;
         private SurfaceView pixelCopySurface;
         private Bitmap pixelCopyBuffer;
+        private Bitmap pixelCopyFullSurfaceBuffer;
         private Rect pixelCopyDestination;
 
         private TextureView textureVideo;
@@ -1238,6 +1239,10 @@ public final class FloatingIosBottomNavHook {
             if (pixelCopyBuffer != null) {
                 pixelCopyBuffer.recycle();
                 pixelCopyBuffer = null;
+            }
+            if (pixelCopyFullSurfaceBuffer != null) {
+                pixelCopyFullSurfaceBuffer.recycle();
+                pixelCopyFullSurfaceBuffer = null;
             }
             if (textureVideoBuffer != null) {
                 textureVideoBuffer.recycle();
@@ -1827,6 +1832,22 @@ public final class FloatingIosBottomNavHook {
                         sourceRect,
                         destination,
                         result -> {
+                            if (result == PixelCopy.ERROR_SOURCE_NO_DATA
+                                    && !destination.isRecycled()
+                                    && surface.isAttachedToWindow()
+                                    && pixelCopySurface == surface) {
+                                // Instagram Reels can expose a Surface whose buffer transform
+                                // does not match SurfaceView coordinates. Let PixelCopy's
+                                // SurfaceView overload resolve that transform, then crop the
+                                // navbar intersection from the returned frame.
+                                captureSurfaceViewPixelCopyFallback(
+                                        surface,
+                                        sourceRect,
+                                        destinationRect
+                                );
+                                return;
+                            }
+
                             pixelCopyInFlight = false;
                             if (result != PixelCopy.SUCCESS
                                     || destination.isRecycled()
@@ -1845,21 +1866,12 @@ public final class FloatingIosBottomNavHook {
                                 return;
                             }
 
-                            pixelCopyDestination = new Rect(destinationRect);
-                            logVideoBackdropMode("Surface/PixelCopy-overlap");
-                            backdropView.setSurfacePatch(
+                            publishSurfaceVideoPatch(
+                                    surface,
                                     destination,
-                                    pixelCopyDestination
+                                    destinationRect,
+                                    "Surface/PixelCopy-overlap"
                             );
-                            selectionLens.setSurfacePatch(
-                                    destination,
-                                    pixelCopyDestination
-                            );
-
-                            // The hidden exported tab row is recorded on the next frame. Force
-                            // that frame so the video pixels pass through its own
-                            // vibrancy -> blur -> lens chain too.
-                            postOnAnimation(this::captureBackdrop);
                         },
                         mainHandler
                 );
@@ -1874,6 +1886,195 @@ public final class FloatingIosBottomNavHook {
                     );
                 }
             }
+        }
+
+        private void captureSurfaceViewPixelCopyFallback(
+                SurfaceView surface,
+                Rect sourceRectInView,
+                Rect destinationRect
+        ) {
+            int sourceWidth = Math.max(2, surface.getWidth());
+            int sourceHeight = Math.max(2, surface.getHeight());
+
+            // This buffer represents the full SurfaceView in view coordinates. Keep it
+            // reasonably small because we only need enough detail for an 8dp blur/lens.
+            float scale = Math.min(
+                    1f,
+                    720f / Math.max(sourceWidth, sourceHeight)
+            );
+            int fullWidth = Math.max(2, Math.round(sourceWidth * scale));
+            int fullHeight = Math.max(2, Math.round(sourceHeight * scale));
+
+            if (pixelCopyFullSurfaceBuffer == null
+                    || pixelCopyFullSurfaceBuffer.isRecycled()
+                    || pixelCopyFullSurfaceBuffer.getWidth() != fullWidth
+                    || pixelCopyFullSurfaceBuffer.getHeight() != fullHeight) {
+                if (pixelCopyFullSurfaceBuffer != null
+                        && !pixelCopyFullSurfaceBuffer.isRecycled()) {
+                    pixelCopyFullSurfaceBuffer.recycle();
+                }
+                pixelCopyFullSurfaceBuffer = Bitmap.createBitmap(
+                        fullWidth,
+                        fullHeight,
+                        Bitmap.Config.ARGB_8888
+                );
+            }
+
+            Bitmap fullFrame = pixelCopyFullSurfaceBuffer;
+            try {
+                PixelCopy.request(
+                        surface,
+                        fullFrame,
+                        result -> {
+                            pixelCopyInFlight = false;
+
+                            if (result != PixelCopy.SUCCESS
+                                    || fullFrame.isRecycled()
+                                    || !surface.isAttachedToWindow()
+                                    || pixelCopySurface != surface) {
+                                long now = SystemClock.uptimeMillis();
+                                if (now - lastPixelCopyFailureLogAt > 3000L) {
+                                    lastPixelCopyFailureLogAt = now;
+                                    ModuleLog.line(
+                                            "(InstaLy | FloatingNav): SurfaceView PixelCopy fallback result="
+                                                    + result
+                                    );
+                                }
+                                return;
+                            }
+
+                            Rect scaledSource = new Rect(
+                                    Math.max(
+                                            0,
+                                            Math.round(
+                                                    sourceRectInView.left
+                                                            * fullWidth
+                                                            / (float) sourceWidth
+                                            )
+                                    ),
+                                    Math.max(
+                                            0,
+                                            Math.round(
+                                                    sourceRectInView.top
+                                                            * fullHeight
+                                                            / (float) sourceHeight
+                                            )
+                                    ),
+                                    Math.min(
+                                            fullWidth,
+                                            Math.round(
+                                                    sourceRectInView.right
+                                                            * fullWidth
+                                                            / (float) sourceWidth
+                                            )
+                                    ),
+                                    Math.min(
+                                            fullHeight,
+                                            Math.round(
+                                                    sourceRectInView.bottom
+                                                            * fullHeight
+                                                            / (float) sourceHeight
+                                            )
+                                    )
+                            );
+
+                            if (scaledSource.width() <= 1
+                                    || scaledSource.height() <= 1) {
+                                return;
+                            }
+
+                            int patchWidth = Math.max(
+                                    2,
+                                    destinationRect.width()
+                            );
+                            int patchHeight = Math.max(
+                                    2,
+                                    destinationRect.height()
+                            );
+                            if (pixelCopyBuffer == null
+                                    || pixelCopyBuffer.isRecycled()
+                                    || pixelCopyBuffer.getWidth() != patchWidth
+                                    || pixelCopyBuffer.getHeight() != patchHeight) {
+                                if (pixelCopyBuffer != null
+                                        && !pixelCopyBuffer.isRecycled()) {
+                                    pixelCopyBuffer.recycle();
+                                }
+                                pixelCopyBuffer = Bitmap.createBitmap(
+                                        patchWidth,
+                                        patchHeight,
+                                        Bitmap.Config.ARGB_8888
+                                );
+                            }
+
+                            Canvas crop = new Canvas(pixelCopyBuffer);
+                            crop.drawColor(
+                                    Color.TRANSPARENT,
+                                    PorterDuff.Mode.CLEAR
+                            );
+                            crop.drawBitmap(
+                                    fullFrame,
+                                    scaledSource,
+                                    new Rect(
+                                            0,
+                                            0,
+                                            patchWidth,
+                                            patchHeight
+                                    ),
+                                    new Paint(
+                                            Paint.ANTI_ALIAS_FLAG
+                                                    | Paint.FILTER_BITMAP_FLAG
+                                    )
+                            );
+
+                            publishSurfaceVideoPatch(
+                                    surface,
+                                    pixelCopyBuffer,
+                                    destinationRect,
+                                    "SurfaceView/PixelCopy-transform"
+                            );
+                        },
+                        mainHandler
+                );
+            } catch (Throwable t) {
+                pixelCopyInFlight = false;
+                long now = SystemClock.uptimeMillis();
+                if (now - lastPixelCopyFailureLogAt > 3000L) {
+                    lastPixelCopyFailureLogAt = now;
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): SurfaceView PixelCopy fallback failed",
+                            t
+                    );
+                }
+            }
+        }
+
+        private void publishSurfaceVideoPatch(
+                SurfaceView surface,
+                Bitmap frame,
+                Rect destinationRect,
+                String mode
+        ) {
+            if (frame == null
+                    || frame.isRecycled()
+                    || !surface.isAttachedToWindow()
+                    || pixelCopySurface != surface) {
+                return;
+            }
+
+            pixelCopyDestination = new Rect(destinationRect);
+            logVideoBackdropMode(mode);
+            backdropView.setSurfacePatch(
+                    frame,
+                    pixelCopyDestination
+            );
+            selectionLens.setSurfacePatch(
+                    frame,
+                    pixelCopyDestination
+            );
+
+            // Re-record the hidden exported row with the actual video pixels before its
+            // vibrancy -> blur -> lens effect, matching Kyant's backdrop composition.
+            postOnAnimation(this::captureBackdrop);
         }
 
         private void captureTextureVideo(TextureView texture) {
@@ -2613,6 +2814,11 @@ public final class FloatingIosBottomNavHook {
             if (selector) {
                 drawSelectorSurface(canvas, rect, radius);
             } else {
+                if (Build.VERSION.SDK_INT >= 33 && interactiveShader == null) {
+                    interactiveShader = new RuntimeShader(
+                            INTERACTIVE_HIGHLIGHT_SHADER
+                    );
+                }
                 drawInteractiveHighlight(
                         canvas,
                         rect,
@@ -2621,11 +2827,6 @@ public final class FloatingIosBottomNavHook {
                         interactiveProgress,
                         interactiveCenterX
                 );
-                if (Build.VERSION.SDK_INT >= 33 && interactiveShader == null) {
-                    interactiveShader = new RuntimeShader(
-                            INTERACTIVE_HIGHLIGHT_SHADER
-                    );
-                }
             }
 
             float edgeAlpha = selector ? pressProgress : 1f;
@@ -2709,7 +2910,18 @@ public final class FloatingIosBottomNavHook {
             if (progress <= 0.001f) return;
 
             float centerY = rect.centerY();
-            float radius = rect.height() * 1.5f;
+            float glowRadius = rect.height() * 1.5f;
+            float capsuleRadius = rect.height() / 2f;
+
+            Path capsule = new Path();
+            capsule.addRoundRect(
+                    rect,
+                    capsuleRadius,
+                    capsuleRadius,
+                    Path.Direction.CW
+            );
+            int save = canvas.save();
+            canvas.clipPath(capsule);
 
             paint.setShader(null);
             paint.setMaskFilter(null);
@@ -2738,7 +2950,7 @@ public final class FloatingIosBottomNavHook {
                                 255, 255, 255
                         )
                 );
-                shader.setFloatUniform("radius", radius);
+                shader.setFloatUniform("radius", glowRadius);
                 shader.setFloatUniform(
                         "position",
                         Math.max(rect.left, Math.min(rect.right, centerX)),
@@ -2751,7 +2963,7 @@ public final class FloatingIosBottomNavHook {
                         new RadialGradient(
                                 centerX,
                                 centerY,
-                                radius,
+                                glowRadius,
                                 Color.argb(
                                         Math.round(255f * 0.15f * progress),
                                         255, 255, 255
@@ -2763,6 +2975,7 @@ public final class FloatingIosBottomNavHook {
                 paint.setColor(Color.WHITE);
             }
             canvas.drawRect(rect, paint);
+            canvas.restoreToCount(save);
 
             paint.setShader(null);
             paint.setXfermode(null);
