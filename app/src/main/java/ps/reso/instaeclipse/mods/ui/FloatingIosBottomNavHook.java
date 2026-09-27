@@ -76,6 +76,10 @@ public final class FloatingIosBottomNavHook {
     private static final String FEATURE_KEY = "FloatingIosBottomNav";
     private static final long CAPTURE_INTERVAL_MS = 16L;
     private static final long SELECTION_INTERVAL_MS = 50L;
+    // Instagram recycles Reel SurfaceViews during scroll/transition. Do not tear glass down
+    // during those short gaps or the material color flips between compositor and View backdrops.
+    private static final long VIDEO_COMPOSITOR_HOLD_MS = 1800L;
+    private static final long VIDEO_NAVIGATION_RELEASE_MS = 280L;
     private static final int MAX_APPLY_ATTEMPTS = 8;
     private static final int SIDE_MARGIN_DP = 12;
     private static final int BOTTOM_MARGIN_DP = 16;
@@ -941,9 +945,13 @@ public final class FloatingIosBottomNavHook {
         // the empty holder Surface is readable.
         private Object compositorBodyLayer;
         private Object compositorSelectorLayer;
+        private Object compositorSelectorMirror;
+        private Object compositorRootSurface;
         private SurfaceView compositorVideoSurface;
         private boolean compositorVideoGlassActive;
         private boolean videoUsesCompositorFallback;
+        private long lastVideoCandidateSeenAt;
+        private long lastNativeNavigationAt;
         private long lastCompositorGlassFailureLogAt;
 
         private final Paint hiddenHighlightPaint =
@@ -1080,6 +1088,7 @@ public final class FloatingIosBottomNavHook {
                 selectionLens.setInteractionProgress(pressProgress);
                 selectorChrome.setPressProgress(pressProgress);
                 applyOuterPressTransform();
+                updateCompositorVideoGlassGeometry();
             });
 
             pressScaleXSpring = new SpringAnimation(pressScaleXValue);
@@ -1294,6 +1303,7 @@ public final class FloatingIosBottomNavHook {
         }
 
         void onNativeTabClicked(View directTab) {
+            lastNativeNavigationAt = SystemClock.uptimeMillis();
             List<View> tabs = visibleNativeTabs(nativeBar);
             int index = tabs.indexOf(directTab);
             if (index < 0) return;
@@ -1747,7 +1757,15 @@ public final class FloatingIosBottomNavHook {
             collectIntersectingVideoViews(searchRoot, layerRect, candidates);
             logVideoCandidates(candidates);
 
+            long now = SystemClock.uptimeMillis();
             if (candidates.isEmpty()) {
+                if (shouldHoldCompositorVideoGlass(now)) {
+                    // Keep the current material mode through Instagram's transient SurfaceView
+                    // detach/recreate window. Do NOT flip backdropView/selectionLens alpha here.
+                    logVideoBackdropMode("SurfaceControl/holding-through-surface-swap");
+                    return;
+                }
+
                 clearSurfacePatch();
                 clearTexturePatch();
                 setCompositorFallbackVisual(false);
@@ -1755,6 +1773,8 @@ public final class FloatingIosBottomNavHook {
                 logVideoBackdropMode("none/view-tree");
                 return;
             }
+
+            lastVideoCandidateSeenAt = now;
 
             // Once compositor fallback is active, keep its geometry live every frame but only
             // probe PixelCopy twice per second. Repeated ERROR_SOURCE_NO_DATA at 60 Hz wastes
@@ -1768,6 +1788,21 @@ public final class FloatingIosBottomNavHook {
             if (!pixelCopyInFlight) {
                 tryCaptureVideoCandidate(candidates, 0, layerRect);
             }
+        }
+
+        private boolean shouldHoldCompositorVideoGlass(long now) {
+            if (!compositorVideoGlassActive && !videoUsesCompositorFallback) {
+                return false;
+            }
+
+            // A direct tab navigation is a strong signal that we really left the Reel rather
+            // than Instagram merely swapping decoder surfaces.
+            if (lastNativeNavigationAt > 0L
+                    && now - lastNativeNavigationAt <= 1000L) {
+                return now - lastVideoCandidateSeenAt <= VIDEO_NAVIGATION_RELEASE_MS;
+            }
+
+            return now - lastVideoCandidateSeenAt <= VIDEO_COMPOSITOR_HOLD_MS;
         }
 
         private void tryCaptureVideoCandidate(
@@ -1787,8 +1822,31 @@ public final class FloatingIosBottomNavHook {
                 clearSurfacePatch();
                 clearTexturePatch();
                 if (fallback != null) {
-                    ensureCompositorVideoGlass(fallback);
-                    setCompositorFallbackVisual(compositorVideoGlassActive);
+                    boolean validFallback = false;
+                    try {
+                        android.view.Surface s =
+                                fallback.getHolder() != null
+                                        ? fallback.getHolder().getSurface()
+                                        : null;
+                        validFallback = fallback.isAttachedToWindow()
+                                && s != null
+                                && s.isValid();
+                    } catch (Throwable ignored) {}
+
+                    if (validFallback) {
+                        ensureCompositorVideoGlass(fallback);
+                    } else if (!shouldHoldCompositorVideoGlass(
+                            SystemClock.uptimeMillis()
+                    )) {
+                        destroyCompositorVideoGlass();
+                    }
+
+                    setCompositorFallbackVisual(
+                            compositorVideoGlassActive
+                                    || shouldHoldCompositorVideoGlass(
+                                            SystemClock.uptimeMillis()
+                                    )
+                    );
                     logVideoBackdropMode(
                             compositorVideoGlassActive
                                     ? "SurfaceControl/background-blur"
@@ -2013,10 +2071,25 @@ public final class FloatingIosBottomNavHook {
         }
 
         private void ensureCompositorVideoGlass(SurfaceView surface) {
-            if (Build.VERSION.SDK_INT < 31
-                    || surface == null
-                    || !surface.isAttachedToWindow()) {
+            if (Build.VERSION.SDK_INT < 31 || surface == null) {
                 destroyCompositorVideoGlass();
+                return;
+            }
+
+            boolean sourceReady = surface.isAttachedToWindow();
+            try {
+                android.view.Surface holderSurface =
+                        surface.getHolder() != null
+                                ? surface.getHolder().getSurface()
+                                : null;
+                sourceReady &= holderSurface != null && holderSurface.isValid();
+            } catch (Throwable ignored) {
+                sourceReady = false;
+            }
+
+            if (!sourceReady) {
+                // Instagram often exposes the replacement SurfaceView ~50-150ms before its
+                // producer becomes valid. Keep the old compositor material until that happens.
                 return;
             }
 
@@ -2042,6 +2115,11 @@ public final class FloatingIosBottomNavHook {
                         parent,
                         "InstaLy-VideoGlassSelector"
                 );
+
+                compositorRootSurface = getWindowSurfaceControl();
+                compositorSelectorMirror =
+                        createLiveVideoMirror(parent, compositorRootSurface);
+
                 if (compositorBodyLayer == null
                         || compositorSelectorLayer == null) {
                     destroyCompositorVideoGlass();
@@ -2050,6 +2128,7 @@ public final class FloatingIosBottomNavHook {
 
                 compositorVideoSurface = surface;
                 compositorVideoGlassActive = true;
+                lastVideoCandidateSeenAt = SystemClock.uptimeMillis();
                 updateCompositorVideoGlassGeometry();
             } catch (Throwable t) {
                 destroyCompositorVideoGlass();
@@ -2069,6 +2148,74 @@ public final class FloatingIosBottomNavHook {
             XposedHelpers.callMethod(builder, "setEffectLayer");
             XposedHelpers.callMethod(builder, "setHidden", false);
             return XposedHelpers.callMethod(builder, "build");
+        }
+
+        private Object getWindowSurfaceControl() {
+            try {
+                Object viewRoot =
+                        XposedHelpers.callMethod(
+                                captureRoot.getRootView(),
+                                "getViewRootImpl"
+                        );
+                if (viewRoot == null) return null;
+                return XposedHelpers.callMethod(
+                        viewRoot,
+                        "getSurfaceControl"
+                );
+            } catch (Throwable ignored) {
+                return null;
+            }
+        }
+
+        private Object createLiveVideoMirror(
+                Object source,
+                Object windowRoot
+        ) {
+            if (source == null || windowRoot == null) return null;
+            try {
+                Class<?> surfaceControlClass =
+                        Class.forName("android.view.SurfaceControl");
+                Object mirror = XposedHelpers.callStaticMethod(
+                        surfaceControlClass,
+                        "mirrorSurface",
+                        source
+                );
+                if (mirror == null) return null;
+
+                Class<?> txClass =
+                        Class.forName("android.view.SurfaceControl$Transaction");
+                Object tx = XposedHelpers.newInstance(txClass);
+                XposedHelpers.callMethod(
+                        tx,
+                        "reparent",
+                        mirror,
+                        windowRoot
+                );
+                // SurfaceView itself normally sits below the ViewRoot buffer. Keep the mirror
+                // immediately below ViewRoot too: visible through our translucent glass, while
+                // Instagram's real icons remain above it.
+                try {
+                    XposedHelpers.callMethod(
+                            tx,
+                            "setRelativeLayer",
+                            mirror,
+                            windowRoot,
+                            -1
+                    );
+                } catch (Throwable ignored) {
+                    XposedHelpers.callMethod(tx, "setLayer", mirror, -1);
+                }
+                XposedHelpers.callMethod(tx, "setAlpha", mirror, 0f);
+                XposedHelpers.callMethod(tx, "show", mirror);
+                XposedHelpers.callMethod(tx, "apply");
+                try {
+                    XposedHelpers.callMethod(tx, "close");
+                } catch (Throwable ignored) {}
+                return mirror;
+            } catch (Throwable t) {
+                logCompositorGlassFailure(t);
+                return null;
+            }
         }
 
         private void updateCompositorVideoGlassGeometry() {
@@ -2147,6 +2294,16 @@ public final class FloatingIosBottomNavHook {
                         1000001
                 );
 
+                configureCompositorSelectorRefraction(
+                        tx,
+                        surfaceLocation,
+                        layerLocation,
+                        scaledX,
+                        scaledY,
+                        scaledSelectorWidth,
+                        scaledSelectorHeight
+                );
+
                 XposedHelpers.callMethod(tx, "apply");
                 try {
                     XposedHelpers.callMethod(tx, "close");
@@ -2156,6 +2313,158 @@ public final class FloatingIosBottomNavHook {
                 destroyCompositorVideoGlass();
                 setCompositorFallbackVisual(false);
             }
+        }
+
+        private void configureCompositorSelectorRefraction(
+                Object tx,
+                int[] surfaceLocation,
+                int[] layerLocation,
+                float selectorXRelativeToSurface,
+                float selectorYRelativeToSurface,
+                int selectorWidth,
+                int selectorHeight
+        ) {
+            if (compositorSelectorMirror == null
+                    || compositorRootSurface == null) {
+                return;
+            }
+
+            // Kyant's selector lens is press-dependent: 10dp refraction height / 14dp amount.
+            // SurfaceFlinger cannot run that AGSL over an unreadable SurfaceView, so use the
+            // live mirrored compositor hierarchy and magnify a slightly smaller source crop
+            // into the selector capsule. Alpha follows the same press spring, so rest=0 and
+            // drag=live optical displacement over the blurred base.
+            float p = Math.max(0f, Math.min(1f, pressProgress));
+            if (p <= 0.001f) {
+                XposedHelpers.callMethod(
+                        tx,
+                        "setAlpha",
+                        compositorSelectorMirror,
+                        0f
+                );
+                return;
+            }
+
+            float selectorWindowX =
+                    surfaceLocation[0] + selectorXRelativeToSurface;
+            float selectorWindowY =
+                    surfaceLocation[1] + selectorYRelativeToSurface;
+
+            float insetX = Math.min(
+                    selectorWidth * 0.12f,
+                    dp(getContext(), 7) * p
+            );
+            float insetY = Math.min(
+                    selectorHeight * 0.12f,
+                    dp(getContext(), 5) * p
+            );
+
+            int sourceLeft = Math.max(
+                    0,
+                    Math.round(
+                            selectorWindowX
+                                    - surfaceLocation[0]
+                                    + insetX
+                    )
+            );
+            int sourceTop = Math.max(
+                    0,
+                    Math.round(
+                            selectorWindowY
+                                    - surfaceLocation[1]
+                                    + insetY
+                    )
+            );
+            int sourceRight = Math.min(
+                    compositorVideoSurface.getWidth(),
+                    Math.round(
+                            selectorWindowX
+                                    - surfaceLocation[0]
+                                    + selectorWidth
+                                    - insetX
+                    )
+            );
+            int sourceBottom = Math.min(
+                    compositorVideoSurface.getHeight(),
+                    Math.round(
+                            selectorWindowY
+                                    - surfaceLocation[1]
+                                    + selectorHeight
+                                    - insetY
+                    )
+            );
+
+            if (sourceRight - sourceLeft <= 1
+                    || sourceBottom - sourceTop <= 1) {
+                XposedHelpers.callMethod(
+                        tx,
+                        "setAlpha",
+                        compositorSelectorMirror,
+                        0f
+                );
+                return;
+            }
+
+            View rootView = captureRoot.getRootView();
+            int[] rootLocation = new int[2];
+            rootView.getLocationInWindow(rootLocation);
+
+            Rect sourceCrop = new Rect(
+                    sourceLeft,
+                    sourceTop,
+                    sourceRight,
+                    sourceBottom
+            );
+            Rect destFrame = new Rect(
+                    Math.round(selectorWindowX - rootLocation[0]),
+                    Math.round(selectorWindowY - rootLocation[1]),
+                    Math.round(
+                            selectorWindowX
+                                    - rootLocation[0]
+                                    + selectorWidth
+                    ),
+                    Math.round(
+                            selectorWindowY
+                                    - rootLocation[1]
+                                    + selectorHeight
+                    )
+            );
+
+            try {
+                XposedHelpers.callMethod(
+                        tx,
+                        "setGeometry",
+                        compositorSelectorMirror,
+                        sourceCrop,
+                        destFrame,
+                        0
+                );
+            } catch (Throwable geometryFailure) {
+                // Older vendor builds may expose setMatrix/crop but not setGeometry through
+                // hidden-API stubs. Fail closed: keep blur + normal Kyant View optics rather
+                // than flashing a wrongly-positioned mirror.
+                XposedHelpers.callMethod(
+                        tx,
+                        "setAlpha",
+                        compositorSelectorMirror,
+                        0f
+                );
+                return;
+            }
+
+            XposedHelpers.callMethod(
+                    tx,
+                    "setCornerRadius",
+                    compositorSelectorMirror,
+                    selectorHeight / 2f
+            );
+            XposedHelpers.callMethod(
+                    tx,
+                    "setAlpha",
+                    compositorSelectorMirror,
+                    Math.min(0.88f, 0.88f * p)
+            );
+            XposedHelpers.callMethod(tx, "show", compositorSelectorMirror);
         }
 
         private void configureCompositorEffectLayer(
@@ -2195,7 +2504,13 @@ public final class FloatingIosBottomNavHook {
         }
 
         private void setCompositorFallbackVisual(boolean active) {
+            if (videoUsesCompositorFallback == active) {
+                return;
+            }
             videoUsesCompositorFallback = active;
+
+            // One state transition only, not frame-by-frame alpha flipping while Instagram
+            // swaps Reel surfaces.
             backdropView.setAlpha(active ? 0f : 1f);
             if (selectionLens.getVisibility() == View.VISIBLE) {
                 selectionLens.setAlpha(active ? 0f : 1f);
@@ -2205,12 +2520,15 @@ public final class FloatingIosBottomNavHook {
         private void destroyCompositorVideoGlass() {
             Object body = compositorBodyLayer;
             Object selector = compositorSelectorLayer;
+            Object mirror = compositorSelectorMirror;
             compositorBodyLayer = null;
             compositorSelectorLayer = null;
+            compositorSelectorMirror = null;
+            compositorRootSurface = null;
             compositorVideoSurface = null;
             compositorVideoGlassActive = false;
 
-            if (body == null && selector == null) return;
+            if (body == null && selector == null && mirror == null) return;
 
             try {
                 Class<?> txClass =
@@ -2224,6 +2542,11 @@ public final class FloatingIosBottomNavHook {
                 if (selector != null) {
                     try {
                         XposedHelpers.callMethod(tx, "remove", selector);
+                    } catch (Throwable ignored) {}
+                }
+                if (mirror != null) {
+                    try {
+                        XposedHelpers.callMethod(tx, "remove", mirror);
                     } catch (Throwable ignored) {}
                 }
                 XposedHelpers.callMethod(tx, "apply");
@@ -2240,6 +2563,11 @@ public final class FloatingIosBottomNavHook {
             if (selector != null) {
                 try {
                     XposedHelpers.callMethod(selector, "release");
+                } catch (Throwable ignored) {}
+            }
+            if (mirror != null) {
+                try {
+                    XposedHelpers.callMethod(mirror, "release");
                 } catch (Throwable ignored) {}
             }
         }
