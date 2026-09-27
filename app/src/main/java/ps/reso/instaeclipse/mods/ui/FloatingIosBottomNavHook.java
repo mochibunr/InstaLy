@@ -1858,7 +1858,8 @@ public final class FloatingIosBottomNavHook {
             }
 
             float refractionHeight = (selectionLens ? 10f : 24f) * density;
-            float refractionAmount = (selectionLens ? 14f : 24f) * density;
+            // Kyant's lens() passes -refractionAmount into the refraction shader.
+            float refractionAmount = -(selectionLens ? 14f : 24f) * density;
 
             ColorMatrix matrix = new ColorMatrix();
             matrix.setSaturation(1.5f);
