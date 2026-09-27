@@ -10,27 +10,34 @@ import android.graphics.Color;
 import android.graphics.ColorMatrix;
 import android.graphics.ColorMatrixColorFilter;
 import android.graphics.Paint;
+import android.graphics.Rect;
 import android.graphics.RenderEffect;
 import android.graphics.RuntimeShader;
 import android.graphics.Shader;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.MotionEvent;
-import android.view.VelocityTracker;
+import android.view.PixelCopy;
+import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
 import android.view.ViewTreeObserver;
-import android.view.animation.OvershootInterpolator;
 import android.widget.Checkable;
 import android.widget.FrameLayout;
 
 import java.util.ArrayList;
 import java.util.List;
 import java.util.WeakHashMap;
+
+import androidx.dynamicanimation.animation.FloatValueHolder;
+import androidx.dynamicanimation.animation.SpringAnimation;
+import androidx.dynamicanimation.animation.SpringForce;
 
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.XposedHelpers;
@@ -58,8 +65,8 @@ import ps.reso.instaeclipse.utils.log.ModuleLog;
 public final class FloatingIosBottomNavHook {
 
     private static final String FEATURE_KEY = "FloatingIosBottomNav";
-    private static final long CAPTURE_INTERVAL_MS = 40L;
-    private static final long SELECTION_INTERVAL_MS = 70L;
+    private static final long CAPTURE_INTERVAL_MS = 50L;
+    private static final long SELECTION_INTERVAL_MS = 50L;
     private static final int MAX_APPLY_ATTEMPTS = 8;
     private static final int SIDE_MARGIN_DP = 12;
     private static final int BOTTOM_MARGIN_DP = 16;
@@ -811,13 +818,30 @@ public final class FloatingIosBottomNavHook {
         private long lastSelectionAt;
         private boolean listenerAttached;
 
+        private static final float KYANT_PRESSED_SCALE = 78f / 56f;
+
+        private final Handler mainHandler = new Handler(Looper.getMainLooper());
+        private final FloatValueHolder pressScaleXValue = new FloatValueHolder(1f);
+        private final FloatValueHolder pressScaleYValue = new FloatValueHolder(1f);
+        private final SpringAnimation lensPositionSpring;
+        private final SpringAnimation pressScaleXSpring;
+        private final SpringAnimation pressScaleYSpring;
+
         private int visualSelectedTabIndex = -1;
         private boolean draggingLens;
+        private boolean releaseScaleWhenSettled;
         private float dragStartRawX;
         private float dragStartLensX;
-        private float dragDownRawX;
-        private long lensSettleUntil;
-        private VelocityTracker velocityTracker;
+        private float dragTargetX;
+        private float lensSpringVelocity;
+        private float pressScaleX = 1f;
+        private float pressScaleY = 1f;
+
+        private boolean pixelCopyInFlight;
+        private long lastPixelCopyAt;
+        private long lastPixelCopyFailureLogAt;
+        private SurfaceView pixelCopySurface;
+        private Bitmap pixelCopyBuffer;
 
         GlassLayer(Context context, FrameLayout captureRoot, ViewGroup nativeBar, View nativeShadow) {
             super(context);
@@ -853,7 +877,7 @@ public final class FloatingIosBottomNavHook {
             GradientDrawable surface = new GradientDrawable();
             surface.setShape(GradientDrawable.RECTANGLE);
             surface.setCornerRadius(radius);
-            surface.setColor(isLightTheme(context) ? 0x42F8F8F8 : 0x42121212);
+            surface.setColor(isLightTheme(context) ? 0x66FAFAFA : 0x66121212);
             surfaceTint.setBackground(surface);
             addView(surfaceTint, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -879,11 +903,11 @@ public final class FloatingIosBottomNavHook {
             lensSurfaceDrawable = new GradientDrawable();
             lensSurfaceDrawable.setCornerRadius(dp(context, 32));
             lensSurfaceDrawable.setColor(
-                    isLightTheme(context) ? 0x1C000000 : 0x34FFFFFF
+                    isLightTheme(context) ? 0x1A000000 : 0x1AFFFFFF
             );
             lensSurfaceDrawable.setStroke(
                     dp(context, 1),
-                    isLightTheme(context) ? 0x3D000000 : 0x70FFFFFF
+                    isLightTheme(context) ? 0x26000000 : 0x40FFFFFF
             );
             selectionLens.setForeground(lensSurfaceDrawable);
             addView(selectionLens, new FrameLayout.LayoutParams(1, 1));
@@ -896,6 +920,49 @@ public final class FloatingIosBottomNavHook {
                     isLightTheme(context) ? 0x30000000 : 0x55FFFFFF
             );
             setForeground(border);
+
+            lensPositionSpring = new SpringAnimation(selectionLens, SpringAnimation.X);
+            SpringForce positionForce = new SpringForce()
+                    .setDampingRatio(1f)
+                    .setStiffness(1000f);
+            lensPositionSpring.setSpring(positionForce);
+            lensPositionSpring.setMinimumVisibleChange(0.35f);
+            lensPositionSpring.addUpdateListener((animation, value, velocity) -> {
+                lensSpringVelocity = velocity;
+                selectionLens.setSnapshot(snapshot, Math.round(value));
+                applyKyantTransform();
+                updateDragHandleFromLens();
+            });
+            lensPositionSpring.addEndListener((animation, canceled, value, velocity) -> {
+                lensSpringVelocity = 0f;
+                if (!draggingLens && releaseScaleWhenSettled) {
+                    releaseScaleWhenSettled = false;
+                    releaseKyantPress();
+                }
+                applyKyantTransform();
+                updateDragHandleFromLens();
+                postDelayed(this::captureBackdrop, 16L);
+            });
+
+            pressScaleXSpring = new SpringAnimation(pressScaleXValue);
+            pressScaleXSpring.setSpring(new SpringForce()
+                    .setDampingRatio(0.6f)
+                    .setStiffness(250f));
+            pressScaleXSpring.setMinimumVisibleChange(0.001f);
+            pressScaleXSpring.addUpdateListener((animation, value, velocity) -> {
+                pressScaleX = value;
+                applyKyantTransform();
+            });
+
+            pressScaleYSpring = new SpringAnimation(pressScaleYValue);
+            pressScaleYSpring.setSpring(new SpringForce()
+                    .setDampingRatio(0.7f)
+                    .setStiffness(250f));
+            pressScaleYSpring.setMinimumVisibleChange(0.001f);
+            pressScaleYSpring.addUpdateListener((animation, value, velocity) -> {
+                pressScaleY = value;
+                applyKyantTransform();
+            });
 
             preDrawListener = () -> {
                 if (presentationEnforcer != null) {
@@ -936,10 +1003,45 @@ public final class FloatingIosBottomNavHook {
         void attachDragHandle(View handle) {
             this.dragHandle = handle;
             handle.setOnTouchListener((v, event) -> handleLensTouch(event));
-            post(() -> {
-                syncSelection(false);
-                updateDragHandleFromLens();
-            });
+            postOnAnimation(() -> primeInitialSelection(0));
+        }
+
+        private void primeInitialSelection(int attempt) {
+            if (!isAttachedToWindow() || attempt > 16) return;
+
+            List<View> tabs = visibleNativeTabs(nativeBar);
+            if (getWidth() <= 1 || getHeight() <= 1 || tabs.size() < 3) {
+                postOnAnimation(() -> primeInitialSelection(attempt + 1));
+                return;
+            }
+
+            int selected = selectedNativeTabIndex(nativeBar);
+            if (selected < 0 || selected >= tabs.size()) {
+                selected = visualSelectedTabIndex >= 0
+                        && visualSelectedTabIndex < tabs.size()
+                        ? visualSelectedTabIndex
+                        : 0;
+            }
+
+            visualSelectedTabIndex = selected;
+            View tab = tabs.get(selected);
+            if (tab.getWidth() <= 0 || tab.getHeight() <= 0) {
+                postOnAnimation(() -> primeInitialSelection(attempt + 1));
+                return;
+            }
+
+            captureBackdrop();
+            moveLensToTab(tab, false);
+            updateDragHandleFromLens();
+
+            if (selectionLens.getWidth() <= 1 || selectionLens.getHeight() <= 1) {
+                postOnAnimation(() -> primeInitialSelection(attempt + 1));
+                return;
+            }
+
+            ModuleLog.line(
+                    "(InstaLy | FloatingNav): initial liquid selector -> " + selected
+            );
         }
 
         @Override
@@ -956,10 +1058,14 @@ public final class FloatingIosBottomNavHook {
 
         void dispose() {
             detachListener();
-            if (velocityTracker != null) {
-                velocityTracker.recycle();
-                velocityTracker = null;
+            lensPositionSpring.cancel();
+            pressScaleXSpring.cancel();
+            pressScaleYSpring.cancel();
+            if (pixelCopyBuffer != null) {
+                pixelCopyBuffer.recycle();
+                pixelCopyBuffer = null;
             }
+            pixelCopySurface = null;
             if (snapshot != null) {
                 snapshot.recycle();
                 snapshot = null;
@@ -982,6 +1088,8 @@ public final class FloatingIosBottomNavHook {
 
             boolean changed = visualSelectedTabIndex != index;
             visualSelectedTabIndex = index;
+            pressKyant();
+            releaseScaleWhenSettled = true;
             moveLensToTab(directTab, true);
 
             if (changed) {
@@ -1147,34 +1255,41 @@ public final class FloatingIosBottomNavHook {
             selectionLens.setVisibility(View.VISIBLE);
             selectionLens.setAlpha(1f);
 
-            selectionLens.animate().cancel();
-
-            long now = SystemClock.uptimeMillis();
+            dragTargetX = targetX;
             if (animate && selectionLens.getWidth() > 0) {
-                lensSettleUntil = now + 320L;
-                selectionLens.animate()
-                        .x(targetX)
-                        .alpha(1f)
-                        .scaleX(1f)
-                        .scaleY(1f)
-                        .setDuration(240L)
-                        .setInterpolator(new OvershootInterpolator(0.42f))
-                        .withEndAction(() -> {
-                            lensSettleUntil = 0L;
-                            selectionLens.setInteractionActive(false);
-                            updateLensSurface(false);
-                            updateDragHandleFromLens();
-                            postDelayed(this::captureBackdrop, 32L);
-                        })
-                        .start();
+                lensPositionSpring.animateToFinalPosition(targetX);
             } else {
+                lensPositionSpring.cancel();
                 selectionLens.setX(targetX);
-                selectionLens.setScaleX(1f);
-                selectionLens.setScaleY(1f);
-                lensSettleUntil = 0L;
+                lensSpringVelocity = 0f;
+                applyKyantTransform();
             }
 
             updateDragHandleFromLens();
+        }
+
+        private void pressKyant() {
+            selectionLens.setInteractionActive(true);
+            updateLensSurface(true);
+            pressScaleXSpring.animateToFinalPosition(KYANT_PRESSED_SCALE);
+            pressScaleYSpring.animateToFinalPosition(KYANT_PRESSED_SCALE);
+        }
+
+        private void releaseKyantPress() {
+            selectionLens.setInteractionActive(false);
+            updateLensSurface(false);
+            pressScaleXSpring.animateToFinalPosition(1f);
+            pressScaleYSpring.animateToFinalPosition(1f);
+        }
+
+        private void applyKyantTransform() {
+            // Port of LiquidBottomTabs' velocity-dependent capsule deformation:
+            // scaleX /= 1 - clamp(v * .75); scaleY *= 1 - clamp(v * .25).
+            float normalized = lensSpringVelocity / Math.max(1f, getWidth() * 7.5f);
+            float xVelocityShape = Math.max(-0.2f, Math.min(0.2f, normalized * 0.75f));
+            float yVelocityShape = Math.max(-0.2f, Math.min(0.2f, normalized * 0.25f));
+            selectionLens.setScaleX(pressScaleX / (1f - xVelocityShape));
+            selectionLens.setScaleY(pressScaleY * (1f - yVelocityShape));
         }
 
         private void updateDragHandleFromLens() {
@@ -1217,33 +1332,18 @@ public final class FloatingIosBottomNavHook {
             switch (event.getActionMasked()) {
                 case MotionEvent.ACTION_DOWN: {
                     draggingLens = true;
-                    lensSettleUntil = 0L;
-                    selectionLens.animate().cancel();
+                    releaseScaleWhenSettled = false;
 
                     dragStartRawX = event.getRawX();
-                    dragDownRawX = event.getRawX();
                     dragStartLensX = selectionLens.getX();
+                    dragTargetX = dragStartLensX;
 
-                    if (velocityTracker != null) velocityTracker.recycle();
-                    velocityTracker = VelocityTracker.obtain();
-                    velocityTracker.addMovement(event);
-
-                    selectionLens.setInteractionActive(true);
-                    updateLensSurface(true);
-                    selectionLens.animate()
-                            .scaleX(1.16f)
-                            .scaleY(1.16f)
-                            .setDuration(100L)
-                            .start();
+                    pressKyant();
                     return true;
                 }
 
                 case MotionEvent.ACTION_MOVE: {
                     if (!draggingLens) return false;
-                    if (velocityTracker != null) {
-                        velocityTracker.addMovement(event);
-                        velocityTracker.computeCurrentVelocity(1000);
-                    }
 
                     float rawTarget = dragStartLensX
                             + (event.getRawX() - dragStartRawX);
@@ -1251,23 +1351,11 @@ public final class FloatingIosBottomNavHook {
                             0f,
                             getWidth() - selectionLens.getWidth()
                     );
-                    float targetX = Math.max(0f, Math.min(maxX, rawTarget));
+                    dragTargetX = Math.max(0f, Math.min(maxX, rawTarget));
 
-                    selectionLens.setX(targetX);
-                    selectionLens.setSnapshot(snapshot, Math.round(targetX));
-
-                    float vx = velocityTracker != null
-                            ? velocityTracker.getXVelocity()
-                            : 0f;
-                    float stretch = Math.min(
-                            0.08f,
-                            Math.abs(vx) / 14000f
-                    );
-                    selectionLens.setScaleX(1.16f * (1f + stretch));
-                    selectionLens.setScaleY(
-                            1.16f * (1f - stretch * 0.30f)
-                    );
-                    updateDragHandleFromLens();
+                    // Kyant's DampedDragAnimation does not snap the capsule to the finger.
+                    // The finger updates the spring target and the visual capsule follows it.
+                    lensPositionSpring.animateToFinalPosition(dragTargetX);
                     return true;
                 }
 
@@ -1276,39 +1364,20 @@ public final class FloatingIosBottomNavHook {
                     if (!draggingLens) return false;
                     draggingLens = false;
 
-                    float vx = 0f;
-                    if (velocityTracker != null) {
-                        velocityTracker.addMovement(event);
-                        velocityTracker.computeCurrentVelocity(1000);
-                        vx = velocityTracker.getXVelocity();
-                        velocityTracker.recycle();
-                        velocityTracker = null;
-                    }
-
                     List<View> tabs = visibleNativeTabs(nativeBar);
                     if (tabs.isEmpty()) {
-                        selectionLens.setInteractionActive(false);
-                        updateLensSurface(false);
-                        selectionLens.animate()
-                                .scaleX(1f)
-                                .scaleY(1f)
-                                .setDuration(160L)
-                                .start();
+                        releaseKyantPress();
                         return true;
                     }
 
-                    boolean wasTap = Math.abs(event.getRawX() - dragDownRawX)
-                            < dp(getContext(), 8);
-
-                    float projectedCenter = selectionLens.getX()
-                            + selectionLens.getWidth() / 2f
-                            + (wasTap ? 0f : vx * 0.075f);
-
-                    int targetIndex = nearestTabIndex(tabs, projectedCenter);
+                    int targetIndex;
                     if (event.getActionMasked() == MotionEvent.ACTION_CANCEL
                             && visualSelectedTabIndex >= 0
                             && visualSelectedTabIndex < tabs.size()) {
                         targetIndex = visualSelectedTabIndex;
+                    } else {
+                        float targetCenter = dragTargetX + selectionLens.getWidth() / 2f;
+                        targetIndex = nearestTabIndex(tabs, targetCenter);
                     }
 
                     targetIndex = Math.max(
@@ -1318,6 +1387,9 @@ public final class FloatingIosBottomNavHook {
                     visualSelectedTabIndex = targetIndex;
                     View target = tabs.get(targetIndex);
 
+                    // Match LiquidBottomTabs: round the continuous target only when drag stops,
+                    // spring to the exact tab, then release the press scale as settling completes.
+                    releaseScaleWhenSettled = true;
                     moveLensToTab(target, true);
 
                     if (event.getActionMasked() != MotionEvent.ACTION_CANCEL) {
@@ -1363,15 +1435,15 @@ public final class FloatingIosBottomNavHook {
             int fill = pressed
                     ? 0x08000000
                     : (isLightTheme(getContext())
-                    ? 0x1C000000
-                    : 0x34FFFFFF);
+                    ? 0x1A000000
+                    : 0x1AFFFFFF);
             int stroke = pressed
                     ? (isLightTheme(getContext())
                     ? 0x40000000
                     : 0x66FFFFFF)
                     : (isLightTheme(getContext())
-                    ? 0x3D000000
-                    : 0x70FFFFFF);
+                    ? 0x26000000
+                    : 0x40FFFFFF);
 
             lensSurfaceDrawable.setColor(fill);
             lensSurfaceDrawable.setStroke(dp(getContext(), 1), stroke);
