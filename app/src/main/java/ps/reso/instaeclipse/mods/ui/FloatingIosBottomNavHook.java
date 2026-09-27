@@ -10,6 +10,8 @@ import android.graphics.Color;
 import android.graphics.ColorMatrix;
 import android.graphics.ColorMatrixColorFilter;
 import android.graphics.Paint;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffColorFilter;
 import android.graphics.Rect;
 import android.graphics.RenderEffect;
 import android.graphics.RenderNode;
@@ -849,8 +851,10 @@ public final class FloatingIosBottomNavHook {
 
         // Native-View analogue of Kyant's LayerBackdrop GraphicsLayer.
         private Object liveBackdropNode;
+        private Object tabsBackdropNode;
         private boolean liveBackdropAvailable;
         private boolean loggedLiveBackdrop;
+        private boolean loggedCombinedBackdrop;
         private long lastLiveLayerFailureLogAt;
 
         private boolean pixelCopyInFlight;
@@ -1122,8 +1126,11 @@ public final class FloatingIosBottomNavHook {
             pixelCopySurface = null;
             textureVideo = null;
             liveBackdropNode = null;
+            tabsBackdropNode = null;
             backdropView.setLiveBackdrop(null, 0);
+            backdropView.setSecondaryLiveBackdrop(null);
             selectionLens.setLiveBackdrop(null, 0);
+            selectionLens.setSecondaryLiveBackdrop(null);
             backdropView.setSurfacePatch(null, null);
             selectionLens.setSurfacePatch(null, null);
             backdropView.setTexturePatch(null, null);
@@ -1237,6 +1244,13 @@ public final class FloatingIosBottomNavHook {
                         this::drawBackdropSource
                 );
 
+                tabsBackdropNode = Api29LiveBackdrop.record(
+                        tabsBackdropNode,
+                        width,
+                        height,
+                        this::drawAccentTabsBackdrop
+                );
+
                 liveBackdropAvailable = true;
                 if (!loggedLiveBackdrop) {
                     loggedLiveBackdrop = true;
@@ -1244,20 +1258,33 @@ public final class FloatingIosBottomNavHook {
                             "(InstaLy | FloatingNav): backdrop source=live RenderNode"
                     );
                 }
+                if (!loggedCombinedBackdrop) {
+                    loggedCombinedBackdrop = true;
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): selector backdrop=page+accentTabs (Crema architecture)"
+                    );
+                }
+
                 backdropView.setLiveBackdrop(liveBackdropNode, 0);
+                backdropView.setSecondaryLiveBackdrop(null);
+
                 selectionLens.setLiveBackdrop(
                         liveBackdropNode,
                         Math.round(selectionLens.getX())
                 );
+                selectionLens.setSecondaryLiveBackdrop(tabsBackdropNode);
                 return true;
             } catch (Throwable t) {
                 liveBackdropAvailable = false;
                 liveBackdropNode = null;
+                tabsBackdropNode = null;
                 backdropView.setLiveBackdrop(null, 0);
+                backdropView.setSecondaryLiveBackdrop(null);
                 selectionLens.setLiveBackdrop(
                         null,
                         Math.round(selectionLens.getX())
                 );
+                selectionLens.setSecondaryLiveBackdrop(null);
                 long now = SystemClock.uptimeMillis();
                 if (now - lastLiveLayerFailureLogAt > 3000L) {
                     lastLiveLayerFailureLogAt = now;
@@ -1267,6 +1294,54 @@ public final class FloatingIosBottomNavHook {
                     );
                 }
                 return false;
+            }
+        }
+
+        private void drawAccentTabsBackdrop(Canvas canvas) {
+            // Crema captures an invisible, accent-treated copy of the complete tab row into a
+            // second Backdrop. The moving selector samples that together with the page backdrop.
+            int[] layerLocation = new int[2];
+            int[] childLocation = new int[2];
+            getLocationInWindow(layerLocation);
+
+            int accentColor = isLightTheme(getContext())
+                    ? Color.rgb(0, 122, 255)
+                    : Color.rgb(10, 132, 255);
+
+            Paint tintPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+            tintPaint.setColorFilter(
+                    new PorterDuffColorFilter(accentColor, PorterDuff.Mode.SRC_IN)
+            );
+
+            float tabScale = 1f + 0.20f * pressProgress;
+
+            List<View> tabs = visibleNativeTabs(nativeBar);
+            for (View tab : tabs) {
+                if (tab.getVisibility() != View.VISIBLE || tab.getAlpha() <= 0f) continue;
+
+                tab.getLocationInWindow(childLocation);
+                int left = childLocation[0] - layerLocation[0];
+                int top = childLocation[1] - layerLocation[1];
+
+                int save = canvas.save();
+                canvas.translate(left, top);
+                canvas.scale(
+                        tabScale,
+                        tabScale,
+                        tab.getWidth() / 2f,
+                        tab.getHeight() / 2f
+                );
+
+                int layerSave = canvas.saveLayer(
+                        0f,
+                        0f,
+                        tab.getWidth(),
+                        tab.getHeight(),
+                        tintPaint
+                );
+                tab.draw(canvas);
+                canvas.restoreToCount(layerSave);
+                canvas.restoreToCount(save);
             }
         }
 
@@ -1846,6 +1921,7 @@ public final class FloatingIosBottomNavHook {
 
         private Bitmap snapshot;
         private Object liveBackdropNode;
+        private Object secondaryLiveBackdropNode;
         private Bitmap surfacePatch;
         private Rect surfacePatchDestination;
         private Bitmap texturePatch;
@@ -1872,6 +1948,11 @@ public final class FloatingIosBottomNavHook {
         void setLiveBackdrop(Object renderNode, int sampleOffsetX) {
             this.liveBackdropNode = renderNode;
             this.sampleOffsetX = sampleOffsetX;
+            invalidate();
+        }
+
+        void setSecondaryLiveBackdrop(Object renderNode) {
+            this.secondaryLiveBackdropNode = renderNode;
             invalidate();
         }
 
@@ -1930,6 +2011,14 @@ public final class FloatingIosBottomNavHook {
 
             if (!drewLiveLayer && snapshot != null && !snapshot.isRecycled()) {
                 canvas.drawBitmap(snapshot, 0f, 0f, paint);
+            }
+
+            if (Build.VERSION.SDK_INT >= 29
+                    && secondaryLiveBackdropNode != null
+                    && canvas.isHardwareAccelerated()) {
+                try {
+                    Api29LiveBackdrop.draw(canvas, secondaryLiveBackdropNode);
+                } catch (Throwable ignored) {}
             }
 
             if (surfacePatch != null
