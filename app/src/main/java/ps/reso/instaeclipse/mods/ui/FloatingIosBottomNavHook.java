@@ -299,6 +299,9 @@ public final class FloatingIosBottomNavHook {
 
         FrameLayout selectorHost = layer.getSelectorHost();
         FrameLayout.LayoutParams selectorHostLp = new FrameLayout.LayoutParams(layerLp);
+        selectorHost.setElevation(
+                Math.max(bar.getElevation(), dp(activity, 4)) + dp(activity, 2)
+        );
         host.addView(selectorHost, selectorHostLp);
         selectorHost.bringToFront();
 
