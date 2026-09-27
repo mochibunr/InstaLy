@@ -78,8 +78,8 @@ public final class FloatingIosBottomNavHook {
     private static final long SELECTION_INTERVAL_MS = 50L;
     // Instagram recycles Reel SurfaceViews during scroll/transition. Do not tear glass down
     // during those short gaps or the material color flips between compositor and View backdrops.
-    private static final long VIDEO_COMPOSITOR_HOLD_MS = 1800L;
-    private static final long VIDEO_NAVIGATION_RELEASE_MS = 280L;
+    // Reels SurfaceViews are frequently detached/re-attached for recycling while the Reels
+    // tab remains selected. Glass state is therefore latched to the selected tab, not a timer.
     private static final int MAX_APPLY_ATTEMPTS = 8;
     private static final int SIDE_MARGIN_DP = 12;
     private static final int BOTTOM_MARGIN_DP = 16;
@@ -960,7 +960,7 @@ public final class FloatingIosBottomNavHook {
         private Object compositorBodyLayer;
         private Object compositorSelectorLayer;
         private Object compositorSelectorMirror;
-        private Object compositorRootSurface;
+        private Object compositorRootAttachment;
         private SurfaceView compositorVideoSurface;
         private boolean compositorVideoGlassActive;
         private boolean videoUsesCompositorFallback;
@@ -1331,6 +1331,19 @@ public final class FloatingIosBottomNavHook {
 
         void onNativeTabClicked(View directTab) {
             lastNativeNavigationAt = SystemClock.uptimeMillis();
+
+            int clipsId = resourceId(getContext(), "clips_tab");
+            if (clipsId != 0 && directTab.getId() != clipsId) {
+                // This is the only authoritative "we left Reels" signal available here.
+                // Release compositor/video state here instead of guessing from temporary
+                // SurfaceView detach events.
+                clearSurfacePatch();
+                clearTexturePatch();
+                setCompositorFallbackVisual(false);
+                destroyCompositorVideoGlass();
+                restoreReelCenterCompensation();
+            }
+
             List<View> tabs = visibleNativeTabs(nativeBar);
             int index = tabs.indexOf(directTab);
             if (index < 0) return;
@@ -1786,10 +1799,15 @@ public final class FloatingIosBottomNavHook {
 
             long now = SystemClock.uptimeMillis();
             if (candidates.isEmpty()) {
-                if (shouldHoldCompositorVideoGlass(now)) {
-                    // Keep the current material mode through Instagram's transient SurfaceView
-                    // detach/recreate window. Do NOT flip backdropView/selectionLens alpha here.
-                    logVideoBackdropMode("SurfaceControl/holding-through-surface-swap");
+                if (isReelsTabSelected()
+                        && (compositorVideoGlassActive
+                                || videoUsesCompositorFallback)) {
+                    // Instagram can remove the SurfaceView from the View tree for multiple
+                    // seconds while the same Reel is still visible in SurfaceFlinger. Do not
+                    // destroy material state until the user actually leaves clips_tab.
+                    logVideoBackdropMode(
+                            "SurfaceControl/latched-on-reels-tab"
+                    );
                     return;
                 }
 
@@ -1895,18 +1913,9 @@ public final class FloatingIosBottomNavHook {
         }
 
         private boolean shouldHoldCompositorVideoGlass(long now) {
-            if (!compositorVideoGlassActive && !videoUsesCompositorFallback) {
-                return false;
-            }
-
-            // A direct tab navigation is a strong signal that we really left the Reel rather
-            // than Instagram merely swapping decoder surfaces.
-            if (lastNativeNavigationAt > 0L
-                    && now - lastNativeNavigationAt <= 1000L) {
-                return now - lastVideoCandidateSeenAt <= VIDEO_NAVIGATION_RELEASE_MS;
-            }
-
-            return now - lastVideoCandidateSeenAt <= VIDEO_COMPOSITOR_HOLD_MS;
+            return isReelsTabSelected()
+                    && (compositorVideoGlassActive
+                            || videoUsesCompositorFallback);
         }
 
         private void tryCaptureVideoCandidate(
@@ -2220,9 +2229,13 @@ public final class FloatingIosBottomNavHook {
                         "InstaLy-VideoGlassSelector"
                 );
 
-                compositorRootSurface = getWindowSurfaceControl();
+                compositorRootAttachment =
+                        getRootAttachedSurfaceControl();
                 compositorSelectorMirror =
-                        createLiveVideoMirror(parent, compositorRootSurface);
+                        createLiveVideoMirror(
+                                parent,
+                                compositorRootAttachment
+                        );
 
                 if (compositorBodyLayer == null
                         || compositorSelectorLayer == null) {
@@ -2233,6 +2246,9 @@ public final class FloatingIosBottomNavHook {
                 compositorVideoSurface = surface;
                 compositorVideoGlassActive = true;
                 lastVideoCandidateSeenAt = SystemClock.uptimeMillis();
+                ModuleLog.line(
+                        "(InstaLy | FloatingNav): Reel glass material=latched"
+                );
                 updateCompositorVideoGlassGeometry();
             } catch (Throwable t) {
                 destroyCompositorVideoGlass();
@@ -2254,77 +2270,123 @@ public final class FloatingIosBottomNavHook {
             return XposedHelpers.callMethod(builder, "build");
         }
 
-        private Object getWindowSurfaceControl() {
+        private Object getRootAttachedSurfaceControl() {
+            if (Build.VERSION.SDK_INT < 31) return null;
             try {
-                Object viewRoot =
-                        XposedHelpers.callMethod(
-                                captureRoot.getRootView(),
-                                "getViewRootImpl"
-                        );
-                if (viewRoot == null) return null;
+                // Public API since Android 12. Returned object is AttachedSurfaceControl, whose
+                // buildReparentTransaction() exists specifically for app-created SurfaceControls.
                 return XposedHelpers.callMethod(
-                        viewRoot,
-                        "getSurfaceControl"
+                        captureRoot,
+                        "getRootSurfaceControl"
                 );
-            } catch (Throwable ignored) {
+            } catch (Throwable t) {
+                long now = SystemClock.uptimeMillis();
+                if (now - lastCompositorRefractionFailureLogAt > 3000L) {
+                    lastCompositorRefractionFailureLogAt = now;
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): root AttachedSurfaceControl unavailable",
+                            t
+                    );
+                }
                 return null;
             }
         }
 
         private Object createLiveVideoMirror(
                 Object source,
-                Object windowRoot
+                Object rootAttachment
         ) {
-            if (source == null || windowRoot == null) return null;
+            if (source == null || rootAttachment == null) {
+                ModuleLog.line(
+                        "(InstaLy | FloatingNav): live selector mirror unavailable: missing root attachment"
+                );
+                return null;
+            }
+
+            Object mirror = null;
             try {
                 Class<?> surfaceControlClass =
                         Class.forName("android.view.SurfaceControl");
-                Object mirror = XposedHelpers.callStaticMethod(
+                mirror = XposedHelpers.callStaticMethod(
                         surfaceControlClass,
                         "mirrorSurface",
                         source
                 );
-                if (mirror == null) return null;
-
-                Class<?> txClass =
-                        Class.forName("android.view.SurfaceControl$Transaction");
-                Object tx = XposedHelpers.newInstance(txClass);
-                XposedHelpers.callMethod(
-                        tx,
-                        "reparent",
-                        mirror,
-                        windowRoot
-                );
-                // AOSP SurfaceView itself is positioned relative to the ViewRoot surface.
-                // Put the mirror exactly one relative layer above the Reel SurfaceView rather
-                // than guessing a layer below ViewRoot. This keeps it above the video but below
-                // the normal ViewRoot UI/icons.
-                try {
-                    XposedHelpers.callMethod(
-                            tx,
-                            "setRelativeLayer",
-                            mirror,
-                            source,
-                            1
+                if (mirror == null) {
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): live selector mirror unavailable: mirrorSurface returned null"
                     );
-                } catch (Throwable relativeFailure) {
-                    XposedHelpers.callMethod(
-                            tx,
-                            "setRelativeLayer",
-                            mirror,
-                            windowRoot,
-                            -1
-                    );
+                    return null;
                 }
+
+                // Do not reach into ViewRootImpl. AttachedSurfaceControl is Android's supported
+                // way to attach an app-created SurfaceControl to this exact View hierarchy.
+                Object tx = XposedHelpers.callMethod(
+                        rootAttachment,
+                        "buildReparentTransaction",
+                        mirror
+                );
+                if (tx == null) {
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): live selector mirror unavailable: root reparent transaction=null"
+                    );
+                    try {
+                        XposedHelpers.callMethod(mirror, "release");
+                    } catch (Throwable ignored) {}
+                    return null;
+                }
+
+                // SurfaceView defaults below the ViewRoot buffer. Layer -1 on the attached root
+                // keeps this mirror below normal View UI while above the usual SurfaceView
+                // sublayer, so native Instagram icons remain authoritative foreground.
+                XposedHelpers.callMethod(tx, "setLayer", mirror, -1);
                 XposedHelpers.callMethod(tx, "setAlpha", mirror, 0f);
                 XposedHelpers.callMethod(tx, "show", mirror);
-                XposedHelpers.callMethod(tx, "apply");
+
+                boolean scheduled = false;
                 try {
-                    XposedHelpers.callMethod(tx, "close");
-                } catch (Throwable ignored) {}
+                    Object result = XposedHelpers.callMethod(
+                            rootAttachment,
+                            "applyTransactionOnDraw",
+                            tx
+                    );
+                    scheduled = !(result instanceof Boolean)
+                            || (Boolean) result;
+                } catch (Throwable applyOnDrawFailure) {
+                    XposedHelpers.callMethod(tx, "apply");
+                    scheduled = true;
+                }
+
+                captureRoot.invalidate();
+
+                if (!scheduled) {
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): live selector mirror unavailable: root transaction rejected"
+                    );
+                    try {
+                        XposedHelpers.callMethod(mirror, "release");
+                    } catch (Throwable ignored) {}
+                    return null;
+                }
+
+                ModuleLog.line(
+                        "(InstaLy | FloatingNav): live selector mirror=attached"
+                );
                 return mirror;
             } catch (Throwable t) {
-                logCompositorGlassFailure(t);
+                if (mirror != null) {
+                    try {
+                        XposedHelpers.callMethod(mirror, "release");
+                    } catch (Throwable ignored) {}
+                }
+                long now = SystemClock.uptimeMillis();
+                if (now - lastCompositorRefractionFailureLogAt > 3000L) {
+                    lastCompositorRefractionFailureLogAt = now;
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): live selector mirror attach failed",
+                            t
+                    );
+                }
                 return null;
             }
         }
@@ -2475,7 +2537,7 @@ public final class FloatingIosBottomNavHook {
                 int selectorHeight
         ) {
             if (compositorSelectorMirror == null
-                    || compositorRootSurface == null) {
+                    || compositorRootAttachment == null) {
                 return;
             }
 
@@ -2733,12 +2795,26 @@ public final class FloatingIosBottomNavHook {
             }
             videoUsesCompositorFallback = active;
 
-            // One state transition only, not frame-by-frame alpha flipping while Instagram
-            // swaps Reel surfaces.
+            // PixelCopy cannot read Instagram's Reel Surface. Keep the stale raster source hidden,
+            // but never allow the material itself to collapse into plain transparency.
             backdropView.setAlpha(active ? 0f : 1f);
             if (selectionLens.getVisibility() == View.VISIBLE) {
                 selectionLens.setAlpha(active ? 0f : 1f);
             }
+
+            GradientDrawable frost = new GradientDrawable();
+            frost.setShape(GradientDrawable.RECTANGLE);
+            frost.setCornerRadius(dp(getContext(), 100));
+
+            // Kyant's real material is 40% because a true backdrop is present. When the Reel
+            // Surface cannot be sampled, use a denser frosted fallback while compositor blur
+            // remains underneath. This prevents "transparent bar" on devices whose blur is weak.
+            frost.setColor(
+                    isLightTheme(getContext())
+                            ? (active ? 0xA6FAFAFA : 0x66FAFAFA)
+                            : (active ? 0xA6121212 : 0x66121212)
+            );
+            surfaceTint.setBackground(frost);
         }
 
         private void destroyCompositorVideoGlass() {
@@ -2748,7 +2824,7 @@ public final class FloatingIosBottomNavHook {
             compositorBodyLayer = null;
             compositorSelectorLayer = null;
             compositorSelectorMirror = null;
-            compositorRootSurface = null;
+            compositorRootAttachment = null;
             compositorVideoSurface = null;
             compositorVideoGlassActive = false;
             loggedCompositorRefractionActive = false;
