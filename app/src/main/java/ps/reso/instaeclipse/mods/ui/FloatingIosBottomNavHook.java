@@ -297,6 +297,11 @@ public final class FloatingIosBottomNavHook {
         layerLp.height = bar.getHeight();
         host.addView(layer, barIndex, layerLp);
 
+        FrameLayout selectorHost = layer.getSelectorHost();
+        FrameLayout.LayoutParams selectorHostLp = new FrameLayout.LayoutParams(layerLp);
+        host.addView(selectorHost, selectorHostLp);
+        selectorHost.bringToFront();
+
         View dragHandle = new View(activity);
         dragHandle.setBackgroundColor(Color.TRANSPARENT);
         dragHandle.setClickable(true);
@@ -656,6 +661,7 @@ public final class FloatingIosBottomNavHook {
             if (!bar.isAttachedToWindow()
                     || bar.getParent() != host
                     || layer.getParent() != host
+                    || !layer.isSelectorOverlayAttached()
                     || dragHandle.getParent() != host) {
                 return false;
             }
@@ -729,6 +735,12 @@ public final class FloatingIosBottomNavHook {
             for (MarginSnapshot snapshot : reservedContent) {
                 repaired |= snapshot.ensureZeroBottomMargin();
             }
+
+            layer.syncSelectorOverlayLayout(
+                    sideMargin,
+                    bottomMargin,
+                    Math.max(1, bar.getHeight())
+            );
 
             if (layer.getLayoutParams() instanceof FrameLayout.LayoutParams) {
                 FrameLayout.LayoutParams lp =
