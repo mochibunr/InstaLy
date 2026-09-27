@@ -1252,6 +1252,12 @@ public final class FloatingIosBottomNavHook {
                 return true;
             } catch (Throwable t) {
                 liveBackdropAvailable = false;
+                liveBackdropNode = null;
+                backdropView.setLiveBackdrop(null, 0);
+                selectionLens.setLiveBackdrop(
+                        null,
+                        Math.round(selectionLens.getX())
+                );
                 long now = SystemClock.uptimeMillis();
                 if (now - lastLiveLayerFailureLogAt > 3000L) {
                     lastLiveLayerFailureLogAt = now;
@@ -1410,7 +1416,8 @@ public final class FloatingIosBottomNavHook {
                             pixelCopyInFlight = false;
                             if (result != PixelCopy.SUCCESS
                                     || destination.isRecycled()
-                                    || !surface.isAttachedToWindow()) {
+                                    || !surface.isAttachedToWindow()
+                                    || pixelCopySurface != surface) {
                                 if (result != PixelCopy.SUCCESS) {
                                     long now = SystemClock.uptimeMillis();
                                     if (now - lastPixelCopyFailureLogAt > 3000L) {
