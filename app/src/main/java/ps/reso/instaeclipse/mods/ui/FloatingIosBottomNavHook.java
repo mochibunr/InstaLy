@@ -1833,6 +1833,7 @@ public final class FloatingIosBottomNavHook {
         private int configuredWidth = -1;
         private int configuredHeight = -1;
         private float interactionProgress;
+        private Object api33EffectState;
 
         BackdropView(Context context, boolean selectionLens) {
             super(context);
@@ -1868,8 +1869,6 @@ public final class FloatingIosBottomNavHook {
             progress = Math.max(0f, Math.min(1f, progress));
             if (Math.abs(interactionProgress - progress) < 0.002f) return;
             interactionProgress = progress;
-            configuredWidth = -1;
-            configuredHeight = -1;
             if (getWidth() > 0 && getHeight() > 0) {
                 configureEffect(getWidth(), getHeight());
             }
@@ -1938,15 +1937,23 @@ public final class FloatingIosBottomNavHook {
 
         private void configureEffect(int width, int height) {
             if (width <= 0 || height <= 0) return;
-            if (width == configuredWidth && height == configuredHeight) return;
+            boolean geometryChanged =
+                    width != configuredWidth || height != configuredHeight;
             configuredWidth = width;
             configuredHeight = height;
 
             try {
                 if (Build.VERSION.SDK_INT >= 33) {
-                    Api33Effects.applyLiquidGlass(
-                            this, width, height, selectionLens, interactionProgress);
-                } else if (Build.VERSION.SDK_INT >= 31) {
+                    api33EffectState = Api33Effects.applyLiquidGlass(
+                            this,
+                            api33EffectState,
+                            width,
+                            height,
+                            selectionLens,
+                            interactionProgress,
+                            geometryChanged
+                    );
+                } else if (Build.VERSION.SDK_INT >= 31 && geometryChanged) {
                     Api31Effects.applyBlurAndVibrancy(this, dp(getContext(), 8));
                 }
             } catch (Throwable t) {
@@ -2115,55 +2122,83 @@ public final class FloatingIosBottomNavHook {
                 }
                 """;
 
-        static void applyLiquidGlass(
+        private static final class EffectState {
+            final RuntimeShader shader;
+            final boolean selectionLens;
+
+            EffectState(View view, boolean selectionLens) {
+                this.selectionLens = selectionLens;
+                shader = new RuntimeShader(
+                        selectionLens ? DISPERSION_SHADER : REFRACTION_SHADER
+                );
+
+                ColorMatrix matrix = new ColorMatrix();
+                matrix.setSaturation(1.5f);
+                RenderEffect vibrancy = RenderEffect.createColorFilterEffect(
+                        new ColorMatrixColorFilter(matrix)
+                );
+                float blurRadius =
+                        8f * view.getResources().getDisplayMetrics().density;
+                RenderEffect blur = RenderEffect.createBlurEffect(
+                        blurRadius,
+                        blurRadius,
+                        vibrancy,
+                        Shader.TileMode.CLAMP
+                );
+                RenderEffect lens =
+                        RenderEffect.createRuntimeShaderEffect(shader, "content");
+                view.setRenderEffect(
+                        RenderEffect.createChainEffect(lens, blur)
+                );
+            }
+        }
+
+        static Object applyLiquidGlass(
                 View view,
+                Object existingState,
                 int width,
                 int height,
                 boolean selectionLens,
-                float interactionProgress
+                float interactionProgress,
+                boolean geometryChanged
         ) {
-            float density = view.getResources().getDisplayMetrics().density;
-            float blurRadius = 8f * density;
-            float radius = selectionLens ? height / 2f : Math.min(30f * density, height / 2f);
+            EffectState state =
+                    existingState instanceof EffectState
+                            && ((EffectState) existingState).selectionLens == selectionLens
+                            ? (EffectState) existingState
+                            : new EffectState(view, selectionLens);
 
-            // Kyant's selected capsule has no strong lens at rest. Refraction/chromatic
-            // aberration ramps in while pressed/dragging.
+            float density = view.getResources().getDisplayMetrics().density;
             float progress = selectionLens
                     ? Math.max(0f, Math.min(1f, interactionProgress))
                     : 1f;
-            if (selectionLens && progress <= 0.001f) {
-                Api31Effects.applyBlurAndVibrancy(view, blurRadius);
-                return;
-            }
 
-            float refractionHeight =
-                    (selectionLens ? 10f * progress : 24f) * density;
-            // Kyant's lens() passes -refractionAmount into the shader and ramps the
-            // selector lens by pressProgress.
-            float refractionAmount =
-                    -(selectionLens ? 14f * progress : 24f) * density;
+            float radius = selectionLens
+                    ? height / 2f
+                    : Math.min(30f * density, height / 2f);
 
-            ColorMatrix matrix = new ColorMatrix();
-            matrix.setSaturation(1.5f);
-            RenderEffect vibrancy = RenderEffect.createColorFilterEffect(new ColorMatrixColorFilter(matrix));
-            RenderEffect blur = RenderEffect.createBlurEffect(
-                    blurRadius,
-                    blurRadius,
-                    vibrancy,
-                    Shader.TileMode.CLAMP
-            );
+            // Keep one shader/effect alive and update only uniforms. At rest the selector
+            // receives effectively zero lens displacement; during press it ramps exactly like
+            // LiquidBottomTabs' 10dp/14dp * pressProgress.
+            float refractionHeight = selectionLens
+                    ? Math.max(0.001f, 10f * progress * density)
+                    : 24f * density;
+            float refractionAmount = selectionLens
+                    ? -(14f * progress * density)
+                    : -(24f * density);
 
-            RuntimeShader runtime = new RuntimeShader(selectionLens ? DISPERSION_SHADER : REFRACTION_SHADER);
-            runtime.setFloatUniform("size", (float) width, (float) height);
-            runtime.setFloatUniform("radius", radius);
-            runtime.setFloatUniform("refractionHeight", refractionHeight);
-            runtime.setFloatUniform("refractionAmount", refractionAmount);
+            state.shader.setFloatUniform("size", (float) width, (float) height);
+            state.shader.setFloatUniform("radius", radius);
+            state.shader.setFloatUniform("refractionHeight", refractionHeight);
+            state.shader.setFloatUniform("refractionAmount", refractionAmount);
             if (selectionLens) {
-                runtime.setFloatUniform("chromaticAberration", 1f);
+                state.shader.setFloatUniform("chromaticAberration", 1f);
             }
 
-            RenderEffect lens = RenderEffect.createRuntimeShaderEffect(runtime, "content");
-            view.setRenderEffect(RenderEffect.createChainEffect(lens, blur));
+            if (geometryChanged) {
+                view.invalidate();
+            }
+            return state;
         }
     }
 }
