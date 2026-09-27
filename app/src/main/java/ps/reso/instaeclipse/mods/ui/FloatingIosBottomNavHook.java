@@ -932,6 +932,19 @@ public final class FloatingIosBottomNavHook {
         private Rect textureVideoDestination;
         private long lastTextureCopyAt;
         private String lastVideoBackdropMode;
+        private String lastVideoCandidateFingerprint;
+
+        // SurfaceView can be only a parent in the compositor hierarchy while the decoder queues
+        // buffers into child SurfaceControls. PixelCopy of the holder Surface then correctly
+        // returns ERROR_SOURCE_NO_DATA even though video is visible. This fallback creates
+        // SurfaceFlinger effect layers under that SurfaceView hierarchy instead of pretending
+        // the empty holder Surface is readable.
+        private Object compositorBodyLayer;
+        private Object compositorSelectorLayer;
+        private SurfaceView compositorVideoSurface;
+        private boolean compositorVideoGlassActive;
+        private boolean videoUsesCompositorFallback;
+        private long lastCompositorGlassFailureLogAt;
 
         private final Paint hiddenHighlightPaint =
                 new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
@@ -1250,6 +1263,7 @@ public final class FloatingIosBottomNavHook {
             }
             pixelCopySurface = null;
             textureVideo = null;
+            destroyCompositorVideoGlass();
             nativeBar.setScaleX(nativeBarBaseScaleX);
             nativeBar.setScaleY(nativeBarBaseScaleY);
             liveBackdropNode = null;
@@ -1545,15 +1559,9 @@ public final class FloatingIosBottomNavHook {
                 }
             }
 
-            KyantChromeView.drawInteractiveHighlight(
-                    canvas,
-                    body,
-                    hiddenHighlightPaint,
-                    hiddenInteractiveShader,
-                    highlightProgress,
-                    selectorCenterX()
-            );
-
+            // Do not port Kyant's row-level InteractiveHighlight through PorterDuff.ADD here.
+            // On the native View backend it becomes a conspicuous white halo during drag.
+            // Keep the actual selector optics (lens/highlight/shadows) instead.
             drawAccentTabsBackdrop(canvas);
 
             KyantChromeView.drawDefaultHighlight(
@@ -1735,18 +1743,515 @@ public final class FloatingIosBottomNavHook {
                 searchRoot = captureRoot;
             }
 
-            View video = findTopmostIntersectingVideoView(searchRoot, layerRect);
-            if (video instanceof SurfaceView) {
-                clearTexturePatch();
-                captureSurfaceVideo((SurfaceView) video);
-            } else if (video instanceof TextureView) {
-                clearSurfacePatch();
-                captureTextureVideo((TextureView) video);
-            } else {
+            List<View> candidates = new ArrayList<>();
+            collectIntersectingVideoViews(searchRoot, layerRect, candidates);
+            logVideoCandidates(candidates);
+
+            if (candidates.isEmpty()) {
                 clearSurfacePatch();
                 clearTexturePatch();
+                setCompositorFallbackVisual(false);
+                destroyCompositorVideoGlass();
                 logVideoBackdropMode("none/view-tree");
+                return;
             }
+
+            // Once compositor fallback is active, keep its geometry live every frame but only
+            // probe PixelCopy twice per second. Repeated ERROR_SOURCE_NO_DATA at 60 Hz wastes
+            // work and cannot manufacture a producer buffer.
+            if (compositorVideoGlassActive
+                    && SystemClock.uptimeMillis() - lastPixelCopyAt < 500L) {
+                updateCompositorVideoGlassGeometry();
+                return;
+            }
+
+            if (!pixelCopyInFlight) {
+                tryCaptureVideoCandidate(candidates, 0, layerRect);
+            }
+        }
+
+        private void tryCaptureVideoCandidate(
+                List<View> candidates,
+                int index,
+                Rect layerRect
+        ) {
+            if (index >= candidates.size()) {
+                SurfaceView fallback = null;
+                for (View candidate : candidates) {
+                    if (candidate instanceof SurfaceView) {
+                        fallback = (SurfaceView) candidate;
+                        break;
+                    }
+                }
+
+                clearSurfacePatch();
+                clearTexturePatch();
+                if (fallback != null) {
+                    ensureCompositorVideoGlass(fallback);
+                    setCompositorFallbackVisual(compositorVideoGlassActive);
+                    logVideoBackdropMode(
+                            compositorVideoGlassActive
+                                    ? "SurfaceControl/background-blur"
+                                    : "video-candidates-unreadable"
+                    );
+                } else {
+                    setCompositorFallbackVisual(false);
+                    destroyCompositorVideoGlass();
+                    logVideoBackdropMode("video-candidates-unreadable");
+                }
+                return;
+            }
+
+            View candidate = candidates.get(index);
+            if (candidate instanceof TextureView) {
+                if (tryCaptureTextureCandidate(
+                        (TextureView) candidate,
+                        layerRect
+                )) {
+                    setCompositorFallbackVisual(false);
+                    destroyCompositorVideoGlass();
+                    return;
+                }
+                tryCaptureVideoCandidate(candidates, index + 1, layerRect);
+                return;
+            }
+
+            if (!(candidate instanceof SurfaceView)) {
+                tryCaptureVideoCandidate(candidates, index + 1, layerRect);
+                return;
+            }
+
+            SurfaceView surface = (SurfaceView) candidate;
+            if (!surface.isAttachedToWindow()
+                    || surface.getWidth() <= 1
+                    || surface.getHeight() <= 1
+                    || surface.getHolder() == null
+                    || surface.getHolder().getSurface() == null
+                    || !surface.getHolder().getSurface().isValid()) {
+                tryCaptureVideoCandidate(candidates, index + 1, layerRect);
+                return;
+            }
+
+            int[] surfaceLocation = new int[2];
+            surface.getLocationInWindow(surfaceLocation);
+            Rect surfaceRect = new Rect(
+                    surfaceLocation[0],
+                    surfaceLocation[1],
+                    surfaceLocation[0] + surface.getWidth(),
+                    surfaceLocation[1] + surface.getHeight()
+            );
+            Rect overlap = new Rect();
+            if (!overlap.setIntersect(layerRect, surfaceRect)
+                    || overlap.width() <= 1
+                    || overlap.height() <= 1) {
+                tryCaptureVideoCandidate(candidates, index + 1, layerRect);
+                return;
+            }
+
+            Rect sourceRect = new Rect(
+                    overlap.left - surfaceRect.left,
+                    overlap.top - surfaceRect.top,
+                    overlap.right - surfaceRect.left,
+                    overlap.bottom - surfaceRect.top
+            );
+            Rect destinationRect = new Rect(
+                    overlap.left - layerRect.left,
+                    overlap.top - layerRect.top,
+                    overlap.right - layerRect.left,
+                    overlap.bottom - layerRect.top
+            );
+
+            int copyWidth = Math.max(2, destinationRect.width());
+            int copyHeight = Math.max(2, destinationRect.height());
+            if (pixelCopyBuffer == null
+                    || pixelCopyBuffer.isRecycled()
+                    || pixelCopyBuffer.getWidth() != copyWidth
+                    || pixelCopyBuffer.getHeight() != copyHeight) {
+                if (pixelCopyBuffer != null && !pixelCopyBuffer.isRecycled()) {
+                    pixelCopyBuffer.recycle();
+                }
+                pixelCopyBuffer = Bitmap.createBitmap(
+                        copyWidth,
+                        copyHeight,
+                        Bitmap.Config.ARGB_8888
+                );
+            }
+
+            pixelCopySurface = surface;
+            pixelCopyInFlight = true;
+            lastPixelCopyAt = SystemClock.uptimeMillis();
+            Bitmap destination = pixelCopyBuffer;
+
+            try {
+                PixelCopy.request(
+                        surface,
+                        sourceRect,
+                        destination,
+                        result -> {
+                            pixelCopyInFlight = false;
+                            if (result == PixelCopy.SUCCESS
+                                    && !destination.isRecycled()
+                                    && surface.isAttachedToWindow()) {
+                                setCompositorFallbackVisual(false);
+                                destroyCompositorVideoGlass();
+                                publishSurfaceVideoPatch(
+                                        surface,
+                                        destination,
+                                        destinationRect,
+                                        "SurfaceView/PixelCopy-candidate-" + index
+                                );
+                                return;
+                            }
+
+                            // AOSP defines result=3 as ERROR_SOURCE_NO_DATA: no buffer was queued
+                            // to this Surface. Trying another overload of the same Surface cannot
+                            // change that; move to the next candidate.
+                            tryCaptureVideoCandidate(
+                                    candidates,
+                                    index + 1,
+                                    layerRect
+                            );
+                        },
+                        mainHandler
+                );
+            } catch (Throwable ignored) {
+                pixelCopyInFlight = false;
+                tryCaptureVideoCandidate(candidates, index + 1, layerRect);
+            }
+        }
+
+        private boolean tryCaptureTextureCandidate(
+                TextureView texture,
+                Rect layerRect
+        ) {
+            if (!texture.isAvailable()
+                    || texture.getWidth() <= 1
+                    || texture.getHeight() <= 1) {
+                return false;
+            }
+
+            int[] textureLocation = new int[2];
+            texture.getLocationInWindow(textureLocation);
+            Rect textureRect = new Rect(
+                    textureLocation[0],
+                    textureLocation[1],
+                    textureLocation[0] + texture.getWidth(),
+                    textureLocation[1] + texture.getHeight()
+            );
+            Rect overlap = new Rect();
+            if (!overlap.setIntersect(layerRect, textureRect)
+                    || overlap.width() <= 1
+                    || overlap.height() <= 1) {
+                return false;
+            }
+
+            Bitmap full = null;
+            try {
+                full = texture.getBitmap();
+                if (full == null || full.isRecycled()) return false;
+
+                int copyWidth = Math.max(2, overlap.width());
+                int copyHeight = Math.max(2, overlap.height());
+                if (textureVideoBuffer == null
+                        || textureVideoBuffer.isRecycled()
+                        || textureVideoBuffer.getWidth() != copyWidth
+                        || textureVideoBuffer.getHeight() != copyHeight) {
+                    if (textureVideoBuffer != null
+                            && !textureVideoBuffer.isRecycled()) {
+                        textureVideoBuffer.recycle();
+                    }
+                    textureVideoBuffer = Bitmap.createBitmap(
+                            copyWidth,
+                            copyHeight,
+                            Bitmap.Config.ARGB_8888
+                    );
+                }
+
+                Rect sourceRect = new Rect(
+                        overlap.left - textureRect.left,
+                        overlap.top - textureRect.top,
+                        overlap.right - textureRect.left,
+                        overlap.bottom - textureRect.top
+                );
+                Canvas crop = new Canvas(textureVideoBuffer);
+                crop.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
+                crop.drawBitmap(
+                        full,
+                        sourceRect,
+                        new Rect(0, 0, copyWidth, copyHeight),
+                        new Paint(
+                                Paint.ANTI_ALIAS_FLAG
+                                        | Paint.FILTER_BITMAP_FLAG
+                        )
+                );
+
+                textureVideo = texture;
+                textureVideoDestination = new Rect(
+                        overlap.left - layerRect.left,
+                        overlap.top - layerRect.top,
+                        overlap.right - layerRect.left,
+                        overlap.bottom - layerRect.top
+                );
+                logVideoBackdropMode("TextureView/getBitmap-candidate");
+                backdropView.setTexturePatch(
+                        textureVideoBuffer,
+                        textureVideoDestination
+                );
+                selectionLens.setTexturePatch(
+                        textureVideoBuffer,
+                        textureVideoDestination
+                );
+                postOnAnimation(this::captureBackdrop);
+                return true;
+            } catch (Throwable ignored) {
+                return false;
+            } finally {
+                if (full != null && !full.isRecycled()) {
+                    full.recycle();
+                }
+            }
+        }
+
+        private void ensureCompositorVideoGlass(SurfaceView surface) {
+            if (Build.VERSION.SDK_INT < 31
+                    || surface == null
+                    || !surface.isAttachedToWindow()) {
+                destroyCompositorVideoGlass();
+                return;
+            }
+
+            if (compositorVideoGlassActive
+                    && compositorVideoSurface == surface
+                    && compositorBodyLayer != null
+                    && compositorSelectorLayer != null) {
+                updateCompositorVideoGlassGeometry();
+                return;
+            }
+
+            destroyCompositorVideoGlass();
+
+            try {
+                Object parent = surface.getSurfaceControl();
+                if (parent == null) return;
+
+                compositorBodyLayer = createCompositorEffectLayer(
+                        parent,
+                        "InstaLy-VideoGlassBody"
+                );
+                compositorSelectorLayer = createCompositorEffectLayer(
+                        parent,
+                        "InstaLy-VideoGlassSelector"
+                );
+                if (compositorBodyLayer == null
+                        || compositorSelectorLayer == null) {
+                    destroyCompositorVideoGlass();
+                    return;
+                }
+
+                compositorVideoSurface = surface;
+                compositorVideoGlassActive = true;
+                updateCompositorVideoGlassGeometry();
+            } catch (Throwable t) {
+                destroyCompositorVideoGlass();
+                logCompositorGlassFailure(t);
+            }
+        }
+
+        private Object createCompositorEffectLayer(
+                Object parent,
+                String name
+        ) throws Throwable {
+            Class<?> builderClass =
+                    Class.forName("android.view.SurfaceControl$Builder");
+            Object builder = XposedHelpers.newInstance(builderClass);
+            XposedHelpers.callMethod(builder, "setName", name);
+            XposedHelpers.callMethod(builder, "setParent", parent);
+            XposedHelpers.callMethod(builder, "setEffectLayer");
+            XposedHelpers.callMethod(builder, "setHidden", false);
+            return XposedHelpers.callMethod(builder, "build");
+        }
+
+        private void updateCompositorVideoGlassGeometry() {
+            if (!compositorVideoGlassActive
+                    || compositorVideoSurface == null
+                    || compositorBodyLayer == null
+                    || compositorSelectorLayer == null
+                    || !compositorVideoSurface.isAttachedToWindow()
+                    || getWidth() <= 1
+                    || getHeight() <= 1) {
+                return;
+            }
+
+            try {
+                int[] surfaceLocation = new int[2];
+                int[] layerLocation = new int[2];
+                compositorVideoSurface.getLocationInWindow(surfaceLocation);
+                getLocationInWindow(layerLocation);
+
+                float bodyX = layerLocation[0] - surfaceLocation[0];
+                float bodyY = layerLocation[1] - surfaceLocation[1];
+                int bodyWidth = Math.max(1, getWidth());
+                int bodyHeight = Math.max(1, getHeight());
+
+                float selectorX = bodyX + selectionLens.getX();
+                float selectorY = bodyY + selectionLens.getY();
+                int selectorWidth = Math.max(1, selectionLens.getWidth());
+                int selectorHeight = Math.max(1, selectionLens.getHeight());
+
+                Class<?> txClass =
+                        Class.forName("android.view.SurfaceControl$Transaction");
+                Object tx = XposedHelpers.newInstance(txClass);
+
+                configureCompositorEffectLayer(
+                        tx,
+                        compositorBodyLayer,
+                        bodyX,
+                        bodyY,
+                        bodyWidth,
+                        bodyHeight,
+                        bodyHeight / 2f,
+                        dp(getContext(), 8),
+                        1000000
+                );
+
+                int scaledSelectorWidth = Math.max(
+                        1,
+                        Math.round(
+                                selectorWidth
+                                        * Math.abs(selectionLens.getScaleX())
+                        )
+                );
+                int scaledSelectorHeight = Math.max(
+                        1,
+                        Math.round(
+                                selectorHeight
+                                        * Math.abs(selectionLens.getScaleY())
+                        )
+                );
+                float scaledX =
+                        selectorX
+                                - (scaledSelectorWidth - selectorWidth) / 2f;
+                float scaledY =
+                        selectorY
+                                - (scaledSelectorHeight - selectorHeight) / 2f;
+
+                configureCompositorEffectLayer(
+                        tx,
+                        compositorSelectorLayer,
+                        scaledX,
+                        scaledY,
+                        scaledSelectorWidth,
+                        scaledSelectorHeight,
+                        scaledSelectorHeight / 2f,
+                        dp(getContext(), 14),
+                        1000001
+                );
+
+                XposedHelpers.callMethod(tx, "apply");
+                try {
+                    XposedHelpers.callMethod(tx, "close");
+                } catch (Throwable ignored) {}
+            } catch (Throwable t) {
+                logCompositorGlassFailure(t);
+                destroyCompositorVideoGlass();
+                setCompositorFallbackVisual(false);
+            }
+        }
+
+        private void configureCompositorEffectLayer(
+                Object tx,
+                Object layer,
+                float x,
+                float y,
+                int width,
+                int height,
+                float cornerRadius,
+                int blurRadius,
+                int z
+        ) {
+            XposedHelpers.callMethod(tx, "setLayer", layer, z);
+            XposedHelpers.callMethod(tx, "setPosition", layer, x, y);
+            XposedHelpers.callMethod(
+                    tx,
+                    "setWindowCrop",
+                    layer,
+                    width,
+                    height
+            );
+            XposedHelpers.callMethod(
+                    tx,
+                    "setCornerRadius",
+                    layer,
+                    cornerRadius
+            );
+            XposedHelpers.callMethod(
+                    tx,
+                    "setBackgroundBlurRadius",
+                    layer,
+                    blurRadius
+            );
+            XposedHelpers.callMethod(tx, "setAlpha", layer, 1f);
+            XposedHelpers.callMethod(tx, "show", layer);
+        }
+
+        private void setCompositorFallbackVisual(boolean active) {
+            videoUsesCompositorFallback = active;
+            backdropView.setAlpha(active ? 0f : 1f);
+            if (selectionLens.getVisibility() == View.VISIBLE) {
+                selectionLens.setAlpha(active ? 0f : 1f);
+            }
+        }
+
+        private void destroyCompositorVideoGlass() {
+            Object body = compositorBodyLayer;
+            Object selector = compositorSelectorLayer;
+            compositorBodyLayer = null;
+            compositorSelectorLayer = null;
+            compositorVideoSurface = null;
+            compositorVideoGlassActive = false;
+
+            if (body == null && selector == null) return;
+
+            try {
+                Class<?> txClass =
+                        Class.forName("android.view.SurfaceControl$Transaction");
+                Object tx = XposedHelpers.newInstance(txClass);
+                if (body != null) {
+                    try {
+                        XposedHelpers.callMethod(tx, "remove", body);
+                    } catch (Throwable ignored) {}
+                }
+                if (selector != null) {
+                    try {
+                        XposedHelpers.callMethod(tx, "remove", selector);
+                    } catch (Throwable ignored) {}
+                }
+                XposedHelpers.callMethod(tx, "apply");
+                try {
+                    XposedHelpers.callMethod(tx, "close");
+                } catch (Throwable ignored) {}
+            } catch (Throwable ignored) {}
+
+            if (body != null) {
+                try {
+                    XposedHelpers.callMethod(body, "release");
+                } catch (Throwable ignored) {}
+            }
+            if (selector != null) {
+                try {
+                    XposedHelpers.callMethod(selector, "release");
+                } catch (Throwable ignored) {}
+            }
+        }
+
+        private void logCompositorGlassFailure(Throwable t) {
+            long now = SystemClock.uptimeMillis();
+            if (now - lastCompositorGlassFailureLogAt < 3000L) return;
+            lastCompositorGlassFailureLogAt = now;
+            ModuleLog.line(
+                    "(InstaLy | FloatingNav): SurfaceControl video glass unavailable",
+                    t
+            );
         }
 
         private void captureSurfaceVideo(SurfaceView surface) {
@@ -2214,7 +2719,11 @@ public final class FloatingIosBottomNavHook {
             selectionLens.setTexturePatch(null, null);
         }
 
-        private View findTopmostIntersectingVideoView(View root, Rect layerRect) {
+        private void collectIntersectingVideoViews(
+                View root,
+                Rect layerRect,
+                List<View> out
+        ) {
             if (root == null
                     || root == this
                     || root == selectorHost
@@ -2223,7 +2732,7 @@ public final class FloatingIosBottomNavHook {
                     || root == nativeShadow
                     || root.getVisibility() != View.VISIBLE
                     || root.getAlpha() <= 0f) {
-                return null;
+                return;
             }
 
             if (root instanceof SurfaceView || root instanceof TextureView) {
@@ -2235,18 +2744,55 @@ public final class FloatingIosBottomNavHook {
                         location[0] + root.getWidth(),
                         location[1] + root.getHeight()
                 );
-                return Rect.intersects(layerRect, rect) ? root : null;
+                if (Rect.intersects(layerRect, rect)) {
+                    out.add(root);
+                }
             }
 
             if (root instanceof ViewGroup) {
                 ViewGroup group = (ViewGroup) root;
                 for (int i = group.getChildCount() - 1; i >= 0; i--) {
-                    View found =
-                            findTopmostIntersectingVideoView(group.getChildAt(i), layerRect);
-                    if (found != null) return found;
+                    collectIntersectingVideoViews(
+                            group.getChildAt(i),
+                            layerRect,
+                            out
+                    );
                 }
             }
-            return null;
+        }
+
+        private void logVideoCandidates(List<View> candidates) {
+            StringBuilder fingerprint = new StringBuilder();
+            for (int i = 0; i < candidates.size(); i++) {
+                View candidate = candidates.get(i);
+                if (i > 0) fingerprint.append(" | ");
+                fingerprint.append(candidate.getClass().getSimpleName())
+                        .append("@")
+                        .append(Integer.toHexString(System.identityHashCode(candidate)))
+                        .append("(")
+                        .append(candidate.getWidth())
+                        .append("x")
+                        .append(candidate.getHeight())
+                        .append(")");
+                if (candidate instanceof SurfaceView) {
+                    try {
+                        android.view.Surface surface =
+                                ((SurfaceView) candidate).getHolder().getSurface();
+                        fingerprint.append("[surfaceValid=")
+                                .append(surface != null && surface.isValid())
+                                .append("]");
+                    } catch (Throwable ignored) {}
+                }
+            }
+
+            String value = fingerprint.toString();
+            if (!value.equals(lastVideoCandidateFingerprint)) {
+                lastVideoCandidateFingerprint = value;
+                ModuleLog.line(
+                        "(InstaLy | FloatingNav): video candidates="
+                                + (value.isEmpty() ? "none" : value)
+                );
+            }
         }
 
         private void moveLensToTab(View tab, boolean animate) {
@@ -2290,7 +2836,9 @@ public final class FloatingIosBottomNavHook {
             lensLp.topMargin = Math.max(0, (getHeight() - lensHeight) / 2);
             selectionLens.setLayoutParams(lensLp);
             selectionLens.setVisibility(View.VISIBLE);
-            selectionLens.setAlpha(1f);
+            selectionLens.setAlpha(
+                    videoUsesCompositorFallback ? 0f : 1f
+            );
 
             FrameLayout.LayoutParams chromeLp =
                     new FrameLayout.LayoutParams(lensLp);
@@ -2326,6 +2874,7 @@ public final class FloatingIosBottomNavHook {
             );
             updateInteractiveHighlight();
             applyKyantTransform();
+            updateCompositorVideoGlassGeometry();
             updateDragHandleFromLens();
         }
 
@@ -2365,6 +2914,7 @@ public final class FloatingIosBottomNavHook {
             selectionLens.setInverseScale(scaleX, scaleY);
             selectorChrome.setScaleX(scaleX);
             selectorChrome.setScaleY(scaleY);
+            updateCompositorVideoGlassGeometry();
         }
 
         private void applyOuterPressTransform() {
@@ -2399,10 +2949,11 @@ public final class FloatingIosBottomNavHook {
         }
 
         private void updateInteractiveHighlight() {
-            bodyChrome.setInteractiveHighlight(
-                    highlightProgress,
-                    selectorCenterX()
-            );
+            // The Compose demo can use BlendMode.Plus inside its own offscreen graphics layer.
+            // Native PorterDuff.ADD here visibly blooms outside the intended material, so do not
+            // fake that row-level wash. The moving selector still uses Kyant's lens, thin edge
+            // highlight, press surface and inner shadow.
+            bodyChrome.setInteractiveHighlight(0f, selectorCenterX());
         }
 
         private void updateDragHandleFromLens() {
@@ -2449,7 +3000,6 @@ public final class FloatingIosBottomNavHook {
                     dragLastRawX = event.getRawX();
                     dragTargetValue = tabValue;
                     pressKyant();
-                    highlightProgressSpring.animateToFinalPosition(1f);
                     return true;
                 }
 
@@ -2482,7 +3032,6 @@ public final class FloatingIosBottomNavHook {
                 case MotionEvent.ACTION_CANCEL: {
                     if (!draggingLens) return false;
                     draggingLens = false;
-                    highlightProgressSpring.animateToFinalPosition(0f);
 
                     List<View> tabs = visibleNativeTabs(nativeBar);
                     if (tabs.isEmpty()) {
@@ -3026,10 +3575,7 @@ public final class FloatingIosBottomNavHook {
                 );
                 shader.setColorUniform(
                         "color",
-                        Color.argb(
-                                Math.round(255f * 0.50f * alpha),
-                                255, 255, 255
-                        )
+                        Color.WHITE
                 );
                 shader.setFloatUniform(
                         "angle",
