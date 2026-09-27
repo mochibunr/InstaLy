@@ -263,12 +263,17 @@ public final class FloatingIosBottomNavHook {
         // tab_bar begins. Expand them to the bottom of their native wrapper while leaving tab_bar
         // itself owned by Instagram.
         StringBuilder marginLog = new StringBuilder();
+        int removedBottomReservation = 0;
         for (MarginSnapshot snapshot : reservedContent) {
             if (marginLog.length() > 0) marginLog.append(", ");
             marginLog.append(snapshot.name)
                     .append(":")
                     .append(snapshot.originalBottomMargin)
                     .append("->0");
+            removedBottomReservation = Math.max(
+                    removedBottomReservation,
+                    Math.max(0, snapshot.originalBottomMargin)
+            );
             snapshot.applyZeroBottomMargin();
         }
 
@@ -300,7 +305,13 @@ public final class FloatingIosBottomNavHook {
             return;
         }
 
-        GlassLayer layer = new GlassLayer(activity, host, bar, shadow);
+        GlassLayer layer = new GlassLayer(
+                activity,
+                host,
+                bar,
+                shadow,
+                removedBottomReservation
+        );
         FrameLayout.LayoutParams layerLp = new FrameLayout.LayoutParams(floatingBarLp);
         layerLp.width = ViewGroup.LayoutParams.MATCH_PARENT;
         layerLp.height = bar.getHeight();
@@ -912,6 +923,9 @@ public final class FloatingIosBottomNavHook {
         private float highlightProgress;
         private final float nativeBarBaseScaleX;
         private final float nativeBarBaseScaleY;
+        private final int removedBottomReservationPx;
+        private SurfaceView compensatedReelSurface;
+        private float compensatedReelBaseTranslationY;
 
         // Native-View analogue of Kyant's LayerBackdrop GraphicsLayer.
         private Object liveBackdropNode;
@@ -953,17 +967,29 @@ public final class FloatingIosBottomNavHook {
         private long lastVideoCandidateSeenAt;
         private long lastNativeNavigationAt;
         private long lastCompositorGlassFailureLogAt;
+        private long lastCompositorRefractionFailureLogAt;
+        private boolean loggedCompositorRefractionActive;
 
         private final Paint hiddenHighlightPaint =
                 new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
         private RuntimeShader hiddenInteractiveShader;
         private RuntimeShader hiddenEdgeShader;
 
-        GlassLayer(Context context, FrameLayout captureRoot, ViewGroup nativeBar, View nativeShadow) {
+        GlassLayer(
+                Context context,
+                FrameLayout captureRoot,
+                ViewGroup nativeBar,
+                View nativeShadow,
+                int removedBottomReservationPx
+        ) {
             super(context);
             this.captureRoot = captureRoot;
             this.nativeBar = nativeBar;
             this.nativeShadow = nativeShadow;
+            this.removedBottomReservationPx = Math.max(
+                    0,
+                    removedBottomReservationPx
+            );
             this.nativeBarBaseScaleX = nativeBar.getScaleX();
             this.nativeBarBaseScaleY = nativeBar.getScaleY();
 
@@ -1249,6 +1275,7 @@ public final class FloatingIosBottomNavHook {
 
         void dispose() {
             detachListener();
+            restoreReelCenterCompensation();
             if (selectorHost.getParent() instanceof ViewGroup) {
                 ((ViewGroup) selectorHost.getParent()).removeView(selectorHost);
             }
@@ -1770,11 +1797,13 @@ public final class FloatingIosBottomNavHook {
                 clearTexturePatch();
                 setCompositorFallbackVisual(false);
                 destroyCompositorVideoGlass();
+                restoreReelCenterCompensation();
                 logVideoBackdropMode("none/view-tree");
                 return;
             }
 
             lastVideoCandidateSeenAt = now;
+            updateReelCenterCompensation(candidates);
 
             // Once compositor fallback is active, keep its geometry live every frame but only
             // probe PixelCopy twice per second. Repeated ERROR_SOURCE_NO_DATA at 60 Hz wastes
@@ -1788,6 +1817,81 @@ public final class FloatingIosBottomNavHook {
             if (!pixelCopyInFlight) {
                 tryCaptureVideoCandidate(candidates, 0, layerRect);
             }
+        }
+
+        private void updateReelCenterCompensation(List<View> candidates) {
+            if (removedBottomReservationPx <= 0 || !isReelsTabSelected()) {
+                restoreReelCenterCompensation();
+                return;
+            }
+
+            SurfaceView largest = null;
+            long largestArea = -1L;
+            for (View candidate : candidates) {
+                if (!(candidate instanceof SurfaceView)
+                        || !candidate.isAttachedToWindow()) {
+                    continue;
+                }
+                long area = (long) candidate.getWidth()
+                        * (long) candidate.getHeight();
+                if (area > largestArea) {
+                    largestArea = area;
+                    largest = (SurfaceView) candidate;
+                }
+            }
+
+            if (largest == null) {
+                return;
+            }
+
+            if (compensatedReelSurface != largest) {
+                restoreReelCenterCompensation();
+                compensatedReelSurface = largest;
+                compensatedReelBaseTranslationY = largest.getTranslationY();
+
+                // We removed a bottom-only reservation of R pixels. A vertically-centered Reel
+                // therefore moves down by R/2 when its viewport grows downward by R. Offset the
+                // Reel by exactly -R/2 to preserve Instagram's original visual center while
+                // still allowing content behind the floating navbar.
+                float compensation = removedBottomReservationPx / 2f;
+                largest.setTranslationY(
+                        compensatedReelBaseTranslationY - compensation
+                );
+                ModuleLog.line(
+                        "(InstaLy | FloatingNav): Reel center compensation=-"
+                                + compensation
+                                + "px (removed reservation="
+                                + removedBottomReservationPx
+                                + "px)"
+                );
+            }
+        }
+
+        private boolean isReelsTabSelected() {
+            int clipsId = resourceId(getContext(), "clips_tab");
+            if (clipsId == 0) return false;
+
+            List<View> tabs = visibleNativeTabs(nativeBar);
+            for (int i = 0; i < tabs.size(); i++) {
+                View tab = tabs.get(i);
+                if (tab.getId() != clipsId) continue;
+                return hasSelectedState(tab)
+                        || visualSelectedTabIndex == i;
+            }
+            return false;
+        }
+
+        private void restoreReelCenterCompensation() {
+            SurfaceView surface = compensatedReelSurface;
+            if (surface != null) {
+                try {
+                    surface.setTranslationY(
+                            compensatedReelBaseTranslationY
+                    );
+                } catch (Throwable ignored) {}
+            }
+            compensatedReelSurface = null;
+            compensatedReelBaseTranslationY = 0f;
         }
 
         private boolean shouldHoldCompositorVideoGlass(long now) {
@@ -2191,10 +2295,19 @@ public final class FloatingIosBottomNavHook {
                         mirror,
                         windowRoot
                 );
-                // SurfaceView itself normally sits below the ViewRoot buffer. Keep the mirror
-                // immediately below ViewRoot too: visible through our translucent glass, while
-                // Instagram's real icons remain above it.
+                // AOSP SurfaceView itself is positioned relative to the ViewRoot surface.
+                // Put the mirror exactly one relative layer above the Reel SurfaceView rather
+                // than guessing a layer below ViewRoot. This keeps it above the video but below
+                // the normal ViewRoot UI/icons.
                 try {
+                    XposedHelpers.callMethod(
+                            tx,
+                            "setRelativeLayer",
+                            mirror,
+                            source,
+                            1
+                    );
+                } catch (Throwable relativeFailure) {
                     XposedHelpers.callMethod(
                             tx,
                             "setRelativeLayer",
@@ -2202,8 +2315,6 @@ public final class FloatingIosBottomNavHook {
                             windowRoot,
                             -1
                     );
-                } catch (Throwable ignored) {
-                    XposedHelpers.callMethod(tx, "setLayer", mirror, -1);
                 }
                 XposedHelpers.callMethod(tx, "setAlpha", mirror, 0f);
                 XposedHelpers.callMethod(tx, "show", mirror);
@@ -2249,6 +2360,19 @@ public final class FloatingIosBottomNavHook {
                         Class.forName("android.view.SurfaceControl$Transaction");
                 Object tx = XposedHelpers.newInstance(txClass);
 
+                float[] bodyColor =
+                        isLightTheme(getContext())
+                                ? new float[] {
+                                        250f / 255f,
+                                        250f / 255f,
+                                        250f / 255f
+                                }
+                                : new float[] {
+                                        18f / 255f,
+                                        18f / 255f,
+                                        18f / 255f
+                                };
+
                 configureCompositorEffectLayer(
                         tx,
                         compositorBodyLayer,
@@ -2258,7 +2382,9 @@ public final class FloatingIosBottomNavHook {
                         bodyHeight,
                         bodyHeight / 2f,
                         dp(getContext(), 8),
-                        1000000
+                        1000000,
+                        bodyColor,
+                        0.40f
                 );
 
                 int scaledSelectorWidth = Math.max(
@@ -2282,6 +2408,28 @@ public final class FloatingIosBottomNavHook {
                         selectorY
                                 - (scaledSelectorHeight - selectorHeight) / 2f;
 
+                float selectorProgress =
+                        Math.max(0f, Math.min(1f, pressProgress));
+                float restAlpha = 0.10f * (1f - selectorProgress);
+                float pressBlackAlpha = 0.03f * selectorProgress;
+                float selectorAlpha =
+                        1f - (1f - restAlpha) * (1f - pressBlackAlpha);
+
+                float selectorGray = 0f;
+                if (!isLightTheme(getContext())
+                        && selectorAlpha > 0.0001f) {
+                    // White rest layer followed by Kyant's black pressed layer, converted to
+                    // one equivalent premultiplied gray+alpha compositor fill.
+                    selectorGray =
+                            restAlpha * (1f - pressBlackAlpha)
+                                    / selectorAlpha;
+                }
+                float[] selectorColor = new float[] {
+                        selectorGray,
+                        selectorGray,
+                        selectorGray
+                };
+
                 configureCompositorEffectLayer(
                         tx,
                         compositorSelectorLayer,
@@ -2291,7 +2439,9 @@ public final class FloatingIosBottomNavHook {
                         scaledSelectorHeight,
                         scaledSelectorHeight / 2f,
                         dp(getContext(), 14),
-                        1000001
+                        1000001,
+                        selectorColor,
+                        selectorAlpha
                 );
 
                 configureCompositorSelectorRefraction(
@@ -2350,13 +2500,14 @@ public final class FloatingIosBottomNavHook {
             float selectorWindowY =
                     surfaceLocation[1] + selectorYRelativeToSurface;
 
+            float refractionAmount = dp(getContext(), 14) * p;
             float insetX = Math.min(
-                    selectorWidth * 0.12f,
-                    dp(getContext(), 7) * p
+                    selectorWidth * 0.18f,
+                    refractionAmount * 0.70f
             );
             float insetY = Math.min(
-                    selectorHeight * 0.12f,
-                    dp(getContext(), 5) * p
+                    selectorHeight * 0.18f,
+                    refractionAmount * 0.55f
             );
 
             int sourceLeft = Math.max(
@@ -2430,6 +2581,7 @@ public final class FloatingIosBottomNavHook {
                     )
             );
 
+            boolean geometryApplied = false;
             try {
                 XposedHelpers.callMethod(
                         tx,
@@ -2439,10 +2591,58 @@ public final class FloatingIosBottomNavHook {
                         destFrame,
                         0
                 );
+                geometryApplied = true;
             } catch (Throwable geometryFailure) {
-                // Older vendor builds may expose setMatrix/crop but not setGeometry through
-                // hidden-API stubs. Fail closed: keep blur + normal Kyant View optics rather
-                // than flashing a wrongly-positioned mirror.
+                try {
+                    float scaleX =
+                            destFrame.width()
+                                    / (float) Math.max(
+                                            1,
+                                            sourceCrop.width()
+                                    );
+                    float scaleY =
+                            destFrame.height()
+                                    / (float) Math.max(
+                                            1,
+                                            sourceCrop.height()
+                                    );
+
+                    XposedHelpers.callMethod(
+                            tx,
+                            "setWindowCrop",
+                            compositorSelectorMirror,
+                            sourceCrop
+                    );
+                    XposedHelpers.callMethod(
+                            tx,
+                            "setMatrix",
+                            compositorSelectorMirror,
+                            scaleX,
+                            0f,
+                            0f,
+                            scaleY
+                    );
+                    XposedHelpers.callMethod(
+                            tx,
+                            "setPosition",
+                            compositorSelectorMirror,
+                            destFrame.left - sourceCrop.left * scaleX,
+                            destFrame.top - sourceCrop.top * scaleY
+                    );
+                    geometryApplied = true;
+                } catch (Throwable fallbackFailure) {
+                    long now = SystemClock.uptimeMillis();
+                    if (now - lastCompositorRefractionFailureLogAt > 3000L) {
+                        lastCompositorRefractionFailureLogAt = now;
+                        ModuleLog.line(
+                                "(InstaLy | FloatingNav): live selector refraction geometry unavailable",
+                                fallbackFailure
+                        );
+                    }
+                }
+            }
+
+            if (!geometryApplied) {
                 XposedHelpers.callMethod(
                         tx,
                         "setAlpha",
@@ -2450,6 +2650,13 @@ public final class FloatingIosBottomNavHook {
                         0f
                 );
                 return;
+            }
+
+            if (!loggedCompositorRefractionActive) {
+                loggedCompositorRefractionActive = true;
+                ModuleLog.line(
+                        "(InstaLy | FloatingNav): live selector refraction=active"
+                );
             }
 
             XposedHelpers.callMethod(
@@ -2462,7 +2669,7 @@ public final class FloatingIosBottomNavHook {
                     tx,
                     "setAlpha",
                     compositorSelectorMirror,
-                    Math.min(0.88f, 0.88f * p)
+                    p
             );
             XposedHelpers.callMethod(tx, "show", compositorSelectorMirror);
         }
@@ -2476,7 +2683,9 @@ public final class FloatingIosBottomNavHook {
                 int height,
                 float cornerRadius,
                 int blurRadius,
-                int z
+                int z,
+                float[] color,
+                float alpha
         ) {
             XposedHelpers.callMethod(tx, "setLayer", layer, z);
             XposedHelpers.callMethod(tx, "setPosition", layer, x, y);
@@ -2499,7 +2708,22 @@ public final class FloatingIosBottomNavHook {
                     layer,
                     blurRadius
             );
-            XposedHelpers.callMethod(tx, "setAlpha", layer, 1f);
+
+            // AOSP EffectLayer is transparent by default. Give it the actual Kyant material
+            // color so the glass remains visible even when the device's background-blur
+            // contribution is weak or temporarily unavailable.
+            XposedHelpers.callMethod(
+                    tx,
+                    "setColor",
+                    layer,
+                    color
+            );
+            XposedHelpers.callMethod(
+                    tx,
+                    "setAlpha",
+                    layer,
+                    Math.max(0f, Math.min(1f, alpha))
+            );
             XposedHelpers.callMethod(tx, "show", layer);
         }
 
@@ -2527,6 +2751,7 @@ public final class FloatingIosBottomNavHook {
             compositorRootSurface = null;
             compositorVideoSurface = null;
             compositorVideoGlassActive = false;
+            loggedCompositorRefractionActive = false;
 
             if (body == null && selector == null && mirror == null) return;
 
