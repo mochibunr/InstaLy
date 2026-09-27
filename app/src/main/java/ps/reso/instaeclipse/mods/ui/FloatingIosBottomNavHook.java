@@ -12,6 +12,7 @@ import android.graphics.ColorMatrixColorFilter;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RenderEffect;
+import android.graphics.RenderNode;
 import android.graphics.RuntimeShader;
 import android.graphics.Shader;
 import android.graphics.drawable.Drawable;
@@ -24,6 +25,7 @@ import android.view.Gravity;
 import android.view.MotionEvent;
 import android.view.PixelCopy;
 import android.view.SurfaceView;
+import android.view.TextureView;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
@@ -65,7 +67,7 @@ import ps.reso.instaeclipse.utils.log.ModuleLog;
 public final class FloatingIosBottomNavHook {
 
     private static final String FEATURE_KEY = "FloatingIosBottomNav";
-    private static final long CAPTURE_INTERVAL_MS = 50L;
+    private static final long CAPTURE_INTERVAL_MS = 16L;
     private static final long SELECTION_INTERVAL_MS = 50L;
     private static final int MAX_APPLY_ATTEMPTS = 8;
     private static final int SIDE_MARGIN_DP = 12;
@@ -821,27 +823,44 @@ public final class FloatingIosBottomNavHook {
         private static final float KYANT_PRESSED_SCALE = 78f / 56f;
 
         private final Handler mainHandler = new Handler(Looper.getMainLooper());
+
+        // DampedDragAnimation port: animate a continuous TAB VALUE, not pixel X.
+        private final FloatValueHolder tabValueHolder = new FloatValueHolder(0f);
+        private final FloatValueHolder velocityValueHolder = new FloatValueHolder(0f);
+        private final FloatValueHolder pressProgressValue = new FloatValueHolder(0f);
         private final FloatValueHolder pressScaleXValue = new FloatValueHolder(1f);
         private final FloatValueHolder pressScaleYValue = new FloatValueHolder(1f);
-        private final SpringAnimation lensPositionSpring;
+        private final SpringAnimation tabValueSpring;
+        private final SpringAnimation velocitySpring;
+        private final SpringAnimation pressProgressSpring;
         private final SpringAnimation pressScaleXSpring;
         private final SpringAnimation pressScaleYSpring;
 
         private int visualSelectedTabIndex = -1;
         private boolean draggingLens;
         private boolean releaseScaleWhenSettled;
-        private float dragStartRawX;
-        private float dragStartLensX;
-        private float dragTargetX;
-        private float lensSpringVelocity;
+        private float dragLastRawX;
+        private float dragTargetValue;
+        private float tabValue;
+        private float smoothedVelocity;
+        private float pressProgress;
         private float pressScaleX = 1f;
         private float pressScaleY = 1f;
+
+        // Native-View analogue of Kyant's LayerBackdrop GraphicsLayer.
+        private RenderNode liveBackdropNode;
+        private boolean liveBackdropAvailable;
 
         private boolean pixelCopyInFlight;
         private long lastPixelCopyAt;
         private long lastPixelCopyFailureLogAt;
         private SurfaceView pixelCopySurface;
         private Bitmap pixelCopyBuffer;
+        private Rect pixelCopyDestination;
+
+        private TextureView textureVideo;
+        private Bitmap textureVideoBuffer;
+        private Rect textureVideoDestination;
 
         GlassLayer(Context context, FrameLayout captureRoot, ViewGroup nativeBar, View nativeShadow) {
             super(context);
@@ -921,27 +940,52 @@ public final class FloatingIosBottomNavHook {
             );
             setForeground(border);
 
-            lensPositionSpring = new SpringAnimation(selectionLens, SpringAnimation.X);
-            SpringForce positionForce = new SpringForce()
+            tabValueSpring = new SpringAnimation(tabValueHolder);
+            tabValueSpring.setSpring(new SpringForce()
                     .setDampingRatio(1f)
-                    .setStiffness(1000f);
-            lensPositionSpring.setSpring(positionForce);
-            lensPositionSpring.setMinimumVisibleChange(0.35f);
-            lensPositionSpring.addUpdateListener((animation, value, velocity) -> {
-                lensSpringVelocity = velocity;
-                selectionLens.setSnapshot(snapshot, Math.round(value));
-                applyKyantTransform();
-                updateDragHandleFromLens();
+                    .setStiffness(1000f));
+            tabValueSpring.setMinimumVisibleChange(0.001f);
+            tabValueSpring.addUpdateListener((animation, value, velocity) -> {
+                tabValue = value;
+
+                List<View> tabs = visibleNativeTabs(nativeBar);
+                float range = Math.max(1f, tabs.size() - 1f);
+                velocitySpring.animateToFinalPosition(velocity / range);
+
+                applySelectorFromTabValue();
             });
-            lensPositionSpring.addEndListener((animation, canceled, value, velocity) -> {
-                lensSpringVelocity = 0f;
+            tabValueSpring.addEndListener((animation, canceled, value, velocity) -> {
+                tabValue = value;
+                velocitySpring.animateToFinalPosition(0f);
                 if (!draggingLens && releaseScaleWhenSettled) {
                     releaseScaleWhenSettled = false;
                     releaseKyantPress();
                 }
+                applySelectorFromTabValue();
+                postOnAnimation(this::captureBackdrop);
+            });
+
+            // Kyant: velocityAnimation spring(0.5f, 300f).
+            velocitySpring = new SpringAnimation(velocityValueHolder);
+            velocitySpring.setSpring(new SpringForce()
+                    .setDampingRatio(0.5f)
+                    .setStiffness(300f));
+            velocitySpring.setMinimumVisibleChange(0.01f);
+            velocitySpring.addUpdateListener((animation, value, velocity) -> {
+                smoothedVelocity = value;
                 applyKyantTransform();
-                updateDragHandleFromLens();
-                postDelayed(this::captureBackdrop, 16L);
+            });
+
+            // Kyant: pressProgressAnimation spring(1f, 1000f).
+            pressProgressSpring = new SpringAnimation(pressProgressValue);
+            pressProgressSpring.setSpring(new SpringForce()
+                    .setDampingRatio(1f)
+                    .setStiffness(1000f));
+            pressProgressSpring.setMinimumVisibleChange(0.001f);
+            pressProgressSpring.addUpdateListener((animation, value, velocity) -> {
+                pressProgress = Math.max(0f, Math.min(1f, value));
+                selectionLens.setInteractionProgress(pressProgress);
+                updateLensSurface(pressProgress);
             });
 
             pressScaleXSpring = new SpringAnimation(pressScaleXValue);
