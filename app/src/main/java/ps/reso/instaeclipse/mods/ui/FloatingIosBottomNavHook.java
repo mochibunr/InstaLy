@@ -1102,7 +1102,9 @@ public final class FloatingIosBottomNavHook {
 
         void dispose() {
             detachListener();
-            lensPositionSpring.cancel();
+            tabValueSpring.cancel();
+            velocitySpring.cancel();
+            pressProgressSpring.cancel();
             pressScaleXSpring.cancel();
             pressScaleYSpring.cancel();
             if (pixelCopyBuffer != null) {
@@ -1450,74 +1452,111 @@ public final class FloatingIosBottomNavHook {
         }
 
         private void moveLensToTab(View tab, boolean animate) {
-            if (tab == null || tab.getWidth() <= 0 || tab.getHeight() <= 0) return;
+            List<View> tabs = visibleNativeTabs(nativeBar);
+            int index = tabs.indexOf(tab);
+            if (index < 0 || tab.getWidth() <= 0 || tab.getHeight() <= 0) return;
 
+            configureLensGeometry(tab);
+            dragTargetValue = index;
+
+            if (animate) {
+                tabValueSpring.animateToFinalPosition(index);
+            } else {
+                tabValueSpring.cancel();
+                tabValueHolder.setValue(index);
+                tabValue = index;
+                applySelectorFromTabValue();
+            }
+        }
+
+        private void configureLensGeometry(View tab) {
             int[] tabLocation = new int[2];
             int[] layerLocation = new int[2];
             tab.getLocationInWindow(tabLocation);
             getLocationInWindow(layerLocation);
 
-            int tabLeft = tabLocation[0] - layerLocation[0];
             int tabTop = tabLocation[1] - layerLocation[1];
-
             int horizontalInset = Math.min(dp(getContext(), 6), tab.getWidth() / 8);
             int verticalInset = dp(getContext(), 4);
-            int lensWidth = Math.max(
-                    dp(getContext(), 48),
-                    tab.getWidth() - horizontalInset * 2
-            );
-            int lensHeight = Math.max(
-                    dp(getContext(), 42),
-                    tab.getHeight() - verticalInset * 2
-            );
-
-            float targetX = tabLeft + horizontalInset;
-            int targetTop = Math.max(0, tabTop + verticalInset);
 
             FrameLayout.LayoutParams lensLp =
                     (FrameLayout.LayoutParams) selectionLens.getLayoutParams();
-            lensLp.width = lensWidth;
-            lensLp.height = lensHeight;
+            lensLp.width = Math.max(
+                    dp(getContext(), 48),
+                    tab.getWidth() - horizontalInset * 2
+            );
+            lensLp.height = Math.max(
+                    dp(getContext(), 42),
+                    tab.getHeight() - verticalInset * 2
+            );
             lensLp.leftMargin = 0;
-            lensLp.topMargin = targetTop;
+            lensLp.topMargin = Math.max(0, tabTop + verticalInset);
             selectionLens.setLayoutParams(lensLp);
-            selectionLens.setSnapshot(snapshot, Math.round(targetX));
             selectionLens.setVisibility(View.VISIBLE);
             selectionLens.setAlpha(1f);
+        }
 
-            dragTargetX = targetX;
-            if (animate && selectionLens.getWidth() > 0) {
-                lensPositionSpring.animateToFinalPosition(targetX);
-            } else {
-                lensPositionSpring.cancel();
-                selectionLens.setX(targetX);
-                lensSpringVelocity = 0f;
-                applyKyantTransform();
-            }
+        private void applySelectorFromTabValue() {
+            List<View> tabs = visibleNativeTabs(nativeBar);
+            if (tabs.isEmpty()) return;
 
+            float value = Math.max(0f, Math.min(tabs.size() - 1f, tabValue));
+            int lower = Math.max(0, Math.min(tabs.size() - 1, (int) Math.floor(value)));
+            int upper = Math.max(0, Math.min(tabs.size() - 1, lower + 1));
+            float fraction = value - lower;
+
+            View nearest = tabs.get(Math.round(value));
+            configureLensGeometry(nearest);
+
+            float lowerX = lensLeftForTab(tabs.get(lower));
+            float upperX = lensLeftForTab(tabs.get(upper));
+            float x = lowerX + (upperX - lowerX) * fraction;
+
+            selectionLens.setX(x);
+            selectionLens.setSampleOffsetX(Math.round(x));
+            applyKyantTransform();
             updateDragHandleFromLens();
         }
 
+        private float lensLeftForTab(View tab) {
+            int[] tabLocation = new int[2];
+            int[] layerLocation = new int[2];
+            tab.getLocationInWindow(tabLocation);
+            getLocationInWindow(layerLocation);
+            int horizontalInset = Math.min(dp(getContext(), 6), tab.getWidth() / 8);
+            return tabLocation[0] - layerLocation[0] + horizontalInset;
+        }
+
+        private float approximateTabWidth(List<View> tabs) {
+            if (tabs.size() >= 2) {
+                float first = lensLeftForTab(tabs.get(0));
+                float second = lensLeftForTab(tabs.get(1));
+                float distance = Math.abs(second - first);
+                if (distance > 1f) return distance;
+            }
+            return getWidth() / (float) Math.max(1, tabs.size());
+        }
+
         private void pressKyant() {
-            selectionLens.setInteractionActive(true);
-            updateLensSurface(true);
+            pressProgressSpring.animateToFinalPosition(1f);
             pressScaleXSpring.animateToFinalPosition(KYANT_PRESSED_SCALE);
             pressScaleYSpring.animateToFinalPosition(KYANT_PRESSED_SCALE);
         }
 
         private void releaseKyantPress() {
-            selectionLens.setInteractionActive(false);
-            updateLensSurface(false);
+            pressProgressSpring.animateToFinalPosition(0f);
             pressScaleXSpring.animateToFinalPosition(1f);
             pressScaleYSpring.animateToFinalPosition(1f);
         }
 
         private void applyKyantTransform() {
-            // Port of LiquidBottomTabs' velocity-dependent capsule deformation:
-            // scaleX /= 1 - clamp(v * .75); scaleY *= 1 - clamp(v * .25).
-            float normalized = lensSpringVelocity / Math.max(1f, getWidth() * 7.5f);
-            float xVelocityShape = Math.max(-0.2f, Math.min(0.2f, normalized * 0.75f));
-            float yVelocityShape = Math.max(-0.2f, Math.min(0.2f, normalized * 0.25f));
+            // Direct LiquidBottomTabs relationship:
+            // velocity = dampedDragAnimation.velocity / 10
+            // scaleX /= 1 - clamp(velocity * .75, -.2, .2)
+            // scaleY *= 1 - clamp(velocity * .25, -.2, .2)
+            float velocity = smoothedVelocity / 10f;
+            float xVelocityShape = Math.max(-0.2f, Math.min(0.2f, velocity * 0.75f));
+            float yVelocityShape = Math.max(-0.2f, Math.min(0.2f, velocity * 0.25f));
             selectionLens.setScaleX(pressScaleX / (1f - xVelocityShape));
             selectionLens.setScaleY(pressScaleY * (1f - yVelocityShape));
         }
@@ -1563,11 +1602,8 @@ public final class FloatingIosBottomNavHook {
                 case MotionEvent.ACTION_DOWN: {
                     draggingLens = true;
                     releaseScaleWhenSettled = false;
-
-                    dragStartRawX = event.getRawX();
-                    dragStartLensX = selectionLens.getX();
-                    dragTargetX = dragStartLensX;
-
+                    dragLastRawX = event.getRawX();
+                    dragTargetValue = tabValue;
                     pressKyant();
                     return true;
                 }
@@ -1575,17 +1611,25 @@ public final class FloatingIosBottomNavHook {
                 case MotionEvent.ACTION_MOVE: {
                     if (!draggingLens) return false;
 
-                    float rawTarget = dragStartLensX
-                            + (event.getRawX() - dragStartRawX);
-                    float maxX = Math.max(
-                            0f,
-                            getWidth() - selectionLens.getWidth()
-                    );
-                    dragTargetX = Math.max(0f, Math.min(maxX, rawTarget));
+                    List<View> tabs = visibleNativeTabs(nativeBar);
+                    if (tabs.isEmpty()) return true;
 
-                    // Kyant's DampedDragAnimation does not snap the capsule to the finger.
-                    // The finger updates the spring target and the visual capsule follows it.
-                    lensPositionSpring.animateToFinalPosition(dragTargetX);
+                    float rawX = event.getRawX();
+                    float dx = rawX - dragLastRawX;
+                    dragLastRawX = rawX;
+
+                    float tabWidth = Math.max(1f, approximateTabWidth(tabs));
+                    dragTargetValue = Math.max(
+                            0f,
+                            Math.min(
+                                    tabs.size() - 1f,
+                                    dragTargetValue + dx / tabWidth
+                            )
+                    );
+
+                    // Exact DampedDragAnimation idea: the pointer only changes targetValue;
+                    // the visible selector follows through the critical spring.
+                    tabValueSpring.animateToFinalPosition(dragTargetValue);
                     return true;
                 }
 
@@ -1606,25 +1650,18 @@ public final class FloatingIosBottomNavHook {
                             && visualSelectedTabIndex < tabs.size()) {
                         targetIndex = visualSelectedTabIndex;
                     } else {
-                        float targetCenter = dragTargetX + selectionLens.getWidth() / 2f;
-                        targetIndex = nearestTabIndex(tabs, targetCenter);
+                        // Kyant rounds targetValue when the drag stops.
+                        targetIndex = Math.round(dragTargetValue);
                     }
 
-                    targetIndex = Math.max(
-                            0,
-                            Math.min(tabs.size() - 1, targetIndex)
-                    );
+                    targetIndex = Math.max(0, Math.min(tabs.size() - 1, targetIndex));
                     visualSelectedTabIndex = targetIndex;
-                    View target = tabs.get(targetIndex);
-
-                    // Match LiquidBottomTabs: round the continuous target only when drag stops,
-                    // spring to the exact tab, then release the press scale as settling completes.
                     releaseScaleWhenSettled = true;
-                    moveLensToTab(target, true);
+                    tabValueSpring.animateToFinalPosition(targetIndex);
 
                     if (event.getActionMasked() != MotionEvent.ACTION_CANCEL) {
                         try {
-                            target.performClick();
+                            tabs.get(targetIndex).performClick();
                         } catch (Throwable t) {
                             ModuleLog.line(
                                     "(InstaLy | FloatingNav): native tab click failed",
@@ -1661,19 +1698,25 @@ public final class FloatingIosBottomNavHook {
             return best;
         }
 
-        private void updateLensSurface(boolean pressed) {
-            int fill = pressed
-                    ? 0x08000000
-                    : (isLightTheme(getContext())
-                    ? 0x1A000000
-                    : 0x1AFFFFFF);
-            int stroke = pressed
-                    ? (isLightTheme(getContext())
-                    ? 0x40000000
-                    : 0x66FFFFFF)
-                    : (isLightTheme(getContext())
-                    ? 0x26000000
-                    : 0x40FFFFFF);
+        private void updateLensSurface(float progress) {
+            progress = Math.max(0f, Math.min(1f, progress));
+
+            int restRgb = isLightTheme(getContext()) ? 0 : 255;
+            int rgb = Math.round(restRgb * (1f - progress));
+            int alpha = Math.round(26f + (8f - 26f) * progress);
+            int fill = Color.argb(alpha, rgb, rgb, rgb);
+
+            int restStroke = isLightTheme(getContext()) ? 38 : 64;
+            int pressedStroke = isLightTheme(getContext()) ? 64 : 102;
+            int strokeAlpha = Math.round(
+                    restStroke + (pressedStroke - restStroke) * progress
+            );
+            int stroke = Color.argb(
+                    strokeAlpha,
+                    isLightTheme(getContext()) ? 0 : 255,
+                    isLightTheme(getContext()) ? 0 : 255,
+                    isLightTheme(getContext()) ? 0 : 255
+            );
 
             lensSurfaceDrawable.setColor(fill);
             lensSurfaceDrawable.setStroke(dp(getContext(), 1), stroke);
@@ -1688,7 +1731,7 @@ public final class FloatingIosBottomNavHook {
         private int sampleOffsetX;
         private int configuredWidth = -1;
         private int configuredHeight = -1;
-        private boolean interactionActive;
+        private float interactionProgress;
 
         BackdropView(Context context, boolean selectionLens) {
             super(context);
@@ -1702,14 +1745,21 @@ public final class FloatingIosBottomNavHook {
             invalidate();
         }
 
-        void setInteractionActive(boolean active) {
-            if (interactionActive == active) return;
-            interactionActive = active;
+        void setInteractionProgress(float progress) {
+            progress = Math.max(0f, Math.min(1f, progress));
+            if (Math.abs(interactionProgress - progress) < 0.002f) return;
+            interactionProgress = progress;
             configuredWidth = -1;
             configuredHeight = -1;
             if (getWidth() > 0 && getHeight() > 0) {
                 configureEffect(getWidth(), getHeight());
             }
+            invalidate();
+        }
+
+        void setSampleOffsetX(int offsetX) {
+            if (sampleOffsetX == offsetX) return;
+            sampleOffsetX = offsetX;
             invalidate();
         }
 
@@ -1735,7 +1785,7 @@ public final class FloatingIosBottomNavHook {
             try {
                 if (Build.VERSION.SDK_INT >= 33) {
                     Api33Effects.applyLiquidGlass(
-                            this, width, height, selectionLens, interactionActive);
+                            this, width, height, selectionLens, interactionProgress);
                 } else if (Build.VERSION.SDK_INT >= 31) {
                     Api31Effects.applyBlurAndVibrancy(this, dp(getContext(), 8));
                 }
@@ -1888,7 +1938,7 @@ public final class FloatingIosBottomNavHook {
                 int width,
                 int height,
                 boolean selectionLens,
-                boolean interactionActive
+                float interactionProgress
         ) {
             float density = view.getResources().getDisplayMetrics().density;
             float blurRadius = 8f * density;
@@ -1896,14 +1946,20 @@ public final class FloatingIosBottomNavHook {
 
             // Kyant's selected capsule has no strong lens at rest. Refraction/chromatic
             // aberration ramps in while pressed/dragging.
-            if (selectionLens && !interactionActive) {
+            float progress = selectionLens
+                    ? Math.max(0f, Math.min(1f, interactionProgress))
+                    : 1f;
+            if (selectionLens && progress <= 0.001f) {
                 Api31Effects.applyBlurAndVibrancy(view, blurRadius);
                 return;
             }
 
-            float refractionHeight = (selectionLens ? 10f : 24f) * density;
-            // Kyant's lens() passes -refractionAmount into the refraction shader.
-            float refractionAmount = -(selectionLens ? 14f : 24f) * density;
+            float refractionHeight =
+                    (selectionLens ? 10f * progress : 24f) * density;
+            // Kyant's lens() passes -refractionAmount into the shader and ramps the
+            // selector lens by pressProgress.
+            float refractionAmount =
+                    -(selectionLens ? 14f * progress : 24f) * density;
 
             ColorMatrix matrix = new ColorMatrix();
             matrix.setSaturation(1.5f);
