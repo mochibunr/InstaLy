@@ -944,6 +944,17 @@ public final class FloatingIosBottomNavHook {
             );
             setForeground(border);
 
+            // Kyant: velocityAnimation spring(0.5f, 300f).
+            velocitySpring = new SpringAnimation(velocityValueHolder);
+            velocitySpring.setSpring(new SpringForce()
+                    .setDampingRatio(0.5f)
+                    .setStiffness(300f));
+            velocitySpring.setMinimumVisibleChange(0.01f);
+            velocitySpring.addUpdateListener((animation, value, velocity) -> {
+                smoothedVelocity = value;
+                applyKyantTransform();
+            });
+
             tabValueSpring = new SpringAnimation(tabValueHolder);
             tabValueSpring.setSpring(new SpringForce()
                     .setDampingRatio(1f)
@@ -967,17 +978,6 @@ public final class FloatingIosBottomNavHook {
                 }
                 applySelectorFromTabValue();
                 postOnAnimation(this::captureBackdrop);
-            });
-
-            // Kyant: velocityAnimation spring(0.5f, 300f).
-            velocitySpring = new SpringAnimation(velocityValueHolder);
-            velocitySpring.setSpring(new SpringForce()
-                    .setDampingRatio(0.5f)
-                    .setStiffness(300f));
-            velocitySpring.setMinimumVisibleChange(0.01f);
-            velocitySpring.addUpdateListener((animation, value, velocity) -> {
-                smoothedVelocity = value;
-                applyKyantTransform();
             });
 
             // Kyant: pressProgressAnimation spring(1f, 1000f).
