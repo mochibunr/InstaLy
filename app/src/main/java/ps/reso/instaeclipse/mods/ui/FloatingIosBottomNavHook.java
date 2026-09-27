@@ -810,6 +810,7 @@ public final class FloatingIosBottomNavHook {
 
         private final BackdropView backdropView;
         private final View surfaceTint;
+        private final FrameLayout selectorHost;
         private final BackdropView selectionLens;
         private final GradientDrawable lensSurfaceDrawable;
 
@@ -911,6 +912,13 @@ public final class FloatingIosBottomNavHook {
                     ViewGroup.LayoutParams.MATCH_PARENT
             ));
 
+            selectorHost = new FrameLayout(context);
+            selectorHost.setClipChildren(false);
+            selectorHost.setClipToPadding(false);
+            selectorHost.setClickable(false);
+            selectorHost.setFocusable(false);
+            selectorHost.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+
             selectionLens = new BackdropView(context, true);
             selectionLens.setVisibility(View.INVISIBLE);
             selectionLens.setAlpha(0f);
@@ -937,7 +945,7 @@ public final class FloatingIosBottomNavHook {
                     isLightTheme(context) ? 0x26000000 : 0x40FFFFFF
             );
             selectionLens.setForeground(lensSurfaceDrawable);
-            addView(selectionLens, new FrameLayout.LayoutParams(1, 1));
+            selectorHost.addView(selectionLens, new FrameLayout.LayoutParams(1, 1));
 
             GradientDrawable border = new GradientDrawable();
             border.setColor(Color.TRANSPARENT);
@@ -1027,6 +1035,9 @@ public final class FloatingIosBottomNavHook {
                 if (getVisibility() != wantedVisibility) {
                     setVisibility(wantedVisibility);
                 }
+                if (selectorHost.getVisibility() != wantedVisibility) {
+                    selectorHost.setVisibility(wantedVisibility);
+                }
                 if (dragHandle != null && dragHandle.getVisibility() != wantedVisibility) {
                     dragHandle.setVisibility(wantedVisibility);
                 }
@@ -1050,6 +1061,37 @@ public final class FloatingIosBottomNavHook {
 
         void setPresentationEnforcer(Runnable enforcer) {
             this.presentationEnforcer = enforcer;
+        }
+
+        FrameLayout getSelectorHost() {
+            return selectorHost;
+        }
+
+        boolean isSelectorOverlayAttached() {
+            return selectorHost.getParent() == captureRoot;
+        }
+
+        void syncSelectorOverlayLayout(int sideMargin, int bottomMargin, int height) {
+            if (!(selectorHost.getLayoutParams() instanceof FrameLayout.LayoutParams)) return;
+            FrameLayout.LayoutParams lp =
+                    (FrameLayout.LayoutParams) selectorHost.getLayoutParams();
+            int desiredHeight = Math.max(1, height);
+            if (lp.width == ViewGroup.LayoutParams.MATCH_PARENT
+                    && lp.height == desiredHeight
+                    && lp.gravity == Gravity.BOTTOM
+                    && lp.leftMargin == sideMargin
+                    && lp.rightMargin == sideMargin
+                    && lp.bottomMargin == bottomMargin) {
+                return;
+            }
+            FrameLayout.LayoutParams fixed = new FrameLayout.LayoutParams(lp);
+            fixed.width = ViewGroup.LayoutParams.MATCH_PARENT;
+            fixed.height = desiredHeight;
+            fixed.gravity = Gravity.BOTTOM;
+            fixed.leftMargin = sideMargin;
+            fixed.rightMargin = sideMargin;
+            fixed.bottomMargin = bottomMargin;
+            selectorHost.setLayoutParams(fixed);
         }
 
         void attachDragHandle(View handle) {
@@ -1110,6 +1152,9 @@ public final class FloatingIosBottomNavHook {
 
         void dispose() {
             detachListener();
+            if (selectorHost.getParent() instanceof ViewGroup) {
+                ((ViewGroup) selectorHost.getParent()).removeView(selectorHost);
+            }
             tabValueSpring.cancel();
             velocitySpring.cancel();
             pressProgressSpring.cancel();
