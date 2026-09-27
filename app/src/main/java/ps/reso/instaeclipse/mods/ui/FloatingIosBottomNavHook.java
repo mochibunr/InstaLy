@@ -850,6 +850,7 @@ public final class FloatingIosBottomNavHook {
         // Native-View analogue of Kyant's LayerBackdrop GraphicsLayer.
         private Object liveBackdropNode;
         private boolean liveBackdropAvailable;
+        private boolean loggedLiveBackdrop;
         private long lastLiveLayerFailureLogAt;
 
         private boolean pixelCopyInFlight;
@@ -862,6 +863,8 @@ public final class FloatingIosBottomNavHook {
         private TextureView textureVideo;
         private Bitmap textureVideoBuffer;
         private Rect textureVideoDestination;
+        private long lastTextureCopyAt;
+        private String lastVideoBackdropMode;
 
         GlassLayer(Context context, FrameLayout captureRoot, ViewGroup nativeBar, View nativeShadow) {
             super(context);
@@ -1052,7 +1055,7 @@ public final class FloatingIosBottomNavHook {
         }
 
         private void primeInitialSelection(int attempt) {
-            if (!isAttachedToWindow() || attempt > 16) return;
+            if (!isAttachedToWindow() || attempt > 90) return;
 
             List<View> tabs = visibleNativeTabs(nativeBar);
             if (getWidth() <= 1 || getHeight() <= 1 || tabs.size() < 3) {
@@ -1235,6 +1238,12 @@ public final class FloatingIosBottomNavHook {
                 );
 
                 liveBackdropAvailable = true;
+                if (!loggedLiveBackdrop) {
+                    loggedLiveBackdrop = true;
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): backdrop source=live RenderNode"
+                    );
+                }
                 backdropView.setLiveBackdrop(liveBackdropNode, 0);
                 selectionLens.setLiveBackdrop(
                         liveBackdropNode,
@@ -1417,6 +1426,7 @@ public final class FloatingIosBottomNavHook {
 
                             Rect destinationRect = viewRectInLayer(surface);
                             pixelCopyDestination = destinationRect;
+                            logVideoBackdropMode("SurfaceView/PixelCopy");
                             backdropView.setSurfacePatch(destination, destinationRect);
                             selectionLens.setSurfacePatch(destination, destinationRect);
                         },
@@ -1436,6 +1446,10 @@ public final class FloatingIosBottomNavHook {
         }
 
         private void captureTextureVideo(TextureView texture) {
+            long now = SystemClock.uptimeMillis();
+            if (now - lastTextureCopyAt < 33L) return;
+            lastTextureCopyAt = now;
+
             if (!texture.isAvailable()
                     || texture.getWidth() <= 1
                     || texture.getHeight() <= 1) {
@@ -1473,11 +1487,20 @@ public final class FloatingIosBottomNavHook {
                 }
                 textureVideoBuffer = copied;
                 textureVideoDestination = viewRectInLayer(texture);
+                logVideoBackdropMode("TextureView/getBitmap");
                 backdropView.setTexturePatch(copied, textureVideoDestination);
                 selectionLens.setTexturePatch(copied, textureVideoDestination);
             } catch (Throwable t) {
                 clearTexturePatch();
             }
+        }
+
+        private void logVideoBackdropMode(String mode) {
+            if (mode.equals(lastVideoBackdropMode)) return;
+            lastVideoBackdropMode = mode;
+            ModuleLog.line(
+                    "(InstaLy | FloatingNav): video backdrop source=" + mode
+            );
         }
 
         private Rect viewRectInLayer(View view) {
