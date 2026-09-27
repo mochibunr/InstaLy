@@ -5,6 +5,7 @@ import android.content.Context;
 import android.content.ContextWrapper;
 import android.content.res.Configuration;
 import android.graphics.Bitmap;
+import android.graphics.BlurMaskFilter;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.ColorMatrix;
@@ -36,7 +37,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewOutlineProvider;
 import android.view.ViewTreeObserver;
-import android.view.animation.PathInterpolator;
 import android.widget.Checkable;
 import android.widget.FrameLayout;
 
@@ -76,6 +76,10 @@ public final class FloatingIosBottomNavHook {
     private static final String FEATURE_KEY = "FloatingIosBottomNav";
     private static final long CAPTURE_INTERVAL_MS = 16L;
     private static final long SELECTION_INTERVAL_MS = 50L;
+    // Instagram recycles Reel SurfaceViews during scroll/transition. Do not tear glass down
+    // during those short gaps or the material color flips between compositor and View backdrops.
+    // Reels SurfaceViews are frequently detached/re-attached for recycling while the Reels
+    // tab remains selected. Glass state is therefore latched to the selected tab, not a timer.
     private static final int MAX_APPLY_ATTEMPTS = 8;
     private static final int SIDE_MARGIN_DP = 12;
     private static final int BOTTOM_MARGIN_DP = 16;
@@ -259,12 +263,17 @@ public final class FloatingIosBottomNavHook {
         // tab_bar begins. Expand them to the bottom of their native wrapper while leaving tab_bar
         // itself owned by Instagram.
         StringBuilder marginLog = new StringBuilder();
+        int removedBottomReservation = 0;
         for (MarginSnapshot snapshot : reservedContent) {
             if (marginLog.length() > 0) marginLog.append(", ");
             marginLog.append(snapshot.name)
                     .append(":")
                     .append(snapshot.originalBottomMargin)
                     .append("->0");
+            removedBottomReservation = Math.max(
+                    removedBottomReservation,
+                    Math.max(0, snapshot.originalBottomMargin)
+            );
             snapshot.applyZeroBottomMargin();
         }
 
@@ -275,14 +284,12 @@ public final class FloatingIosBottomNavHook {
 
         int sideMargin = dp(activity, SIDE_MARGIN_DP);
         int bottomMargin = dp(activity, BOTTOM_MARGIN_DP);
-        int barHeight = dp(activity, 64);
 
         // Instagram's wrapper lives inside a fitsSystemWindows root. Do NOT add the system nav
         // inset again; doing so double-counts the gesture/navigation region on this layout.
         FrameLayout.LayoutParams floatingBarLp =
                 new FrameLayout.LayoutParams(originalBarLayoutParams);
         floatingBarLp.width = ViewGroup.LayoutParams.MATCH_PARENT;
-        floatingBarLp.height = barHeight;
         floatingBarLp.gravity = Gravity.BOTTOM;
         floatingBarLp.leftMargin = sideMargin;
         floatingBarLp.rightMargin = sideMargin;
@@ -298,19 +305,31 @@ public final class FloatingIosBottomNavHook {
             return;
         }
 
-        GlassLayer layer = new GlassLayer(activity, host, bar, shadow);
+        GlassLayer layer = new GlassLayer(
+                activity,
+                host,
+                bar,
+                shadow,
+                removedBottomReservation
+        );
         FrameLayout.LayoutParams layerLp = new FrameLayout.LayoutParams(floatingBarLp);
         layerLp.width = ViewGroup.LayoutParams.MATCH_PARENT;
-        layerLp.height = barHeight;
+        layerLp.height = bar.getHeight();
         host.addView(layer, barIndex, layerLp);
 
         FrameLayout selectorHost = layer.getSelectorHost();
         FrameLayout.LayoutParams selectorHostLp = new FrameLayout.LayoutParams(layerLp);
-        selectorHost.setElevation(
-                Math.max(bar.getElevation(), dp(activity, 4)) + dp(activity, 2)
+
+        // Keep the moving optical selector behind Instagram's real tab content. Kyant can draw
+        // its selector above the visible Compose Row because tabsBackdrop is a pixel-perfect
+        // duplicate of that Row. Instagram can mutate icon/layout internals at runtime, so the
+        // native row is the authoritative foreground and the selector stays an optical layer.
+        int nativeBarIndex = host.indexOfChild(bar);
+        host.addView(
+                selectorHost,
+                Math.max(0, nativeBarIndex),
+                selectorHostLp
         );
-        host.addView(selectorHost, selectorHostLp);
-        selectorHost.bringToFront();
 
         View dragHandle = new View(activity);
         dragHandle.setBackgroundColor(Color.TRANSPARENT);
@@ -339,8 +358,7 @@ public final class FloatingIosBottomNavHook {
                 originalShadowVisibility,
                 reservedContent,
                 sideMargin,
-                bottomMargin,
-                barHeight
+                bottomMargin
         );
         layer.setPresentationEnforcer(state::enforcePresentation);
         STATES.put(activity, state);
@@ -628,7 +646,6 @@ public final class FloatingIosBottomNavHook {
         final List<MarginSnapshot> reservedContent;
         final int sideMargin;
         final int bottomMargin;
-        final int barHeight;
 
         private boolean rebindScheduled;
         private long lastRepairLogAt;
@@ -649,8 +666,7 @@ public final class FloatingIosBottomNavHook {
                 int originalShadowVisibility,
                 List<MarginSnapshot> reservedContent,
                 int sideMargin,
-                int bottomMargin,
-                int barHeight
+                int bottomMargin
         ) {
             this.activity = activity;
             this.bar = bar;
@@ -668,7 +684,6 @@ public final class FloatingIosBottomNavHook {
             this.reservedContent = reservedContent;
             this.sideMargin = sideMargin;
             this.bottomMargin = bottomMargin;
-            this.barHeight = barHeight;
         }
 
         boolean isValid(Activity owner) {
@@ -705,14 +720,12 @@ public final class FloatingIosBottomNavHook {
                         (FrameLayout.LayoutParams) bar.getLayoutParams();
 
                 if (lp.width != ViewGroup.LayoutParams.MATCH_PARENT
-                        || lp.height != barHeight
                         || lp.gravity != Gravity.BOTTOM
                         || lp.leftMargin != sideMargin
                         || lp.rightMargin != sideMargin
                         || lp.bottomMargin != bottomMargin) {
                     FrameLayout.LayoutParams fixed = new FrameLayout.LayoutParams(lp);
                     fixed.width = ViewGroup.LayoutParams.MATCH_PARENT;
-                    fixed.height = barHeight;
                     fixed.gravity = Gravity.BOTTOM;
                     fixed.leftMargin = sideMargin;
                     fixed.rightMargin = sideMargin;
@@ -755,13 +768,40 @@ public final class FloatingIosBottomNavHook {
             layer.syncSelectorOverlayLayout(
                     sideMargin,
                     bottomMargin,
-                    barHeight
+                    Math.max(1, bar.getHeight())
             );
+
+            // Optical layers must remain behind the actual Instagram tab row.
+            int barIndexNow = host.indexOfChild(bar);
+            int layerIndexNow = host.indexOfChild(layer);
+            int selectorIndexNow = host.indexOfChild(layer.getSelectorHost());
+            if (barIndexNow >= 0
+                    && (layerIndexNow < 0
+                    || selectorIndexNow < 0
+                    || layerIndexNow >= barIndexNow
+                    || selectorIndexNow >= barIndexNow)) {
+                if (layerIndexNow >= 0) {
+                    host.removeView(layer);
+                }
+                if (selectorIndexNow >= 0) {
+                    host.removeView(layer.getSelectorHost());
+                }
+
+                int target = Math.max(0, host.indexOfChild(bar));
+                host.addView(layer, target, layer.getLayoutParams());
+                target = Math.max(0, host.indexOfChild(bar));
+                host.addView(
+                        layer.getSelectorHost(),
+                        target,
+                        layer.getSelectorHost().getLayoutParams()
+                );
+                repaired = true;
+            }
 
             if (layer.getLayoutParams() instanceof FrameLayout.LayoutParams) {
                 FrameLayout.LayoutParams lp =
                         (FrameLayout.LayoutParams) layer.getLayoutParams();
-                int desiredHeight = barHeight;
+                int desiredHeight = Math.max(1, bar.getHeight());
                 if (lp.width != ViewGroup.LayoutParams.MATCH_PARENT
                         || lp.height != desiredHeight
                         || lp.gravity != Gravity.BOTTOM
@@ -838,14 +878,10 @@ public final class FloatingIosBottomNavHook {
 
         private final BackdropView backdropView;
         private final View surfaceTint;
+        private final KyantChromeView bodyChrome;
         private final FrameLayout selectorHost;
         private final BackdropView selectionLens;
-        private final GradientDrawable lensSurfaceDrawable;
-        private final View selectionSurface;
-        private final Paint interactiveHighlightPaint =
-                new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-        private final Path interactiveHighlightClip = new Path();
-        private final RectF interactiveHighlightRect = new RectF();
+        private final KyantChromeView selectorChrome;
 
         private final ViewTreeObserver.OnPreDrawListener preDrawListener;
 
@@ -866,14 +902,12 @@ public final class FloatingIosBottomNavHook {
         private final FloatValueHolder pressProgressValue = new FloatValueHolder(0f);
         private final FloatValueHolder pressScaleXValue = new FloatValueHolder(1f);
         private final FloatValueHolder pressScaleYValue = new FloatValueHolder(1f);
-        private final FloatValueHolder panelOffsetValue = new FloatValueHolder(0f);
         private final FloatValueHolder highlightProgressValue = new FloatValueHolder(0f);
         private final SpringAnimation tabValueSpring;
         private final SpringAnimation velocitySpring;
         private final SpringAnimation pressProgressSpring;
         private final SpringAnimation pressScaleXSpring;
         private final SpringAnimation pressScaleYSpring;
-        private final SpringAnimation panelOffsetSpring;
         private final SpringAnimation highlightProgressSpring;
 
         private int visualSelectedTabIndex = -1;
@@ -886,15 +920,12 @@ public final class FloatingIosBottomNavHook {
         private float pressProgress;
         private float pressScaleX = 1f;
         private float pressScaleY = 1f;
-        private float panelOffsetRaw;
-        private float panelOffsetPx;
         private float highlightProgress;
-        private final float nativeBarBaseTranslationX;
         private final float nativeBarBaseScaleX;
         private final float nativeBarBaseScaleY;
-
-        private static final PathInterpolator PANEL_EASE_OUT =
-                new PathInterpolator(0f, 0f, 0.58f, 1f);
+        private final int removedBottomReservationPx;
+        private SurfaceView compensatedReelSurface;
+        private float compensatedReelBaseTranslationY;
 
         // Native-View analogue of Kyant's LayerBackdrop GraphicsLayer.
         private Object liveBackdropNode;
@@ -911,6 +942,7 @@ public final class FloatingIosBottomNavHook {
         private long lastPixelCopyFailureLogAt;
         private SurfaceView pixelCopySurface;
         private Bitmap pixelCopyBuffer;
+        private Bitmap pixelCopyFullSurfaceBuffer;
         private Rect pixelCopyDestination;
 
         private TextureView textureVideo;
@@ -918,13 +950,46 @@ public final class FloatingIosBottomNavHook {
         private Rect textureVideoDestination;
         private long lastTextureCopyAt;
         private String lastVideoBackdropMode;
+        private String lastVideoCandidateFingerprint;
 
-        GlassLayer(Context context, FrameLayout captureRoot, ViewGroup nativeBar, View nativeShadow) {
+        // SurfaceView can be only a parent in the compositor hierarchy while the decoder queues
+        // buffers into child SurfaceControls. PixelCopy of the holder Surface then correctly
+        // returns ERROR_SOURCE_NO_DATA even though video is visible. This fallback creates
+        // SurfaceFlinger effect layers under that SurfaceView hierarchy instead of pretending
+        // the empty holder Surface is readable.
+        private Object compositorBodyLayer;
+        private Object compositorSelectorLayer;
+        private Object compositorSelectorMirror;
+        private Object compositorRootAttachment;
+        private SurfaceView compositorVideoSurface;
+        private boolean compositorVideoGlassActive;
+        private boolean videoUsesCompositorFallback;
+        private long lastVideoCandidateSeenAt;
+        private long lastNativeNavigationAt;
+        private long lastCompositorGlassFailureLogAt;
+        private long lastCompositorRefractionFailureLogAt;
+        private boolean loggedCompositorRefractionActive;
+
+        private final Paint hiddenHighlightPaint =
+                new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+        private RuntimeShader hiddenInteractiveShader;
+        private RuntimeShader hiddenEdgeShader;
+
+        GlassLayer(
+                Context context,
+                FrameLayout captureRoot,
+                ViewGroup nativeBar,
+                View nativeShadow,
+                int removedBottomReservationPx
+        ) {
             super(context);
             this.captureRoot = captureRoot;
             this.nativeBar = nativeBar;
             this.nativeShadow = nativeShadow;
-            this.nativeBarBaseTranslationX = nativeBar.getTranslationX();
+            this.removedBottomReservationPx = Math.max(
+                    0,
+                    removedBottomReservationPx
+            );
             this.nativeBarBaseScaleX = nativeBar.getScaleX();
             this.nativeBarBaseScaleY = nativeBar.getScaleY();
 
@@ -934,15 +999,13 @@ public final class FloatingIosBottomNavHook {
             setClickable(false);
             setFocusable(false);
 
-            float radius = dp(context, 32);
-
             backdropView = new BackdropView(context, false);
             backdropView.setOutlineProvider(new ViewOutlineProvider() {
                 @Override
                 public void getOutline(View view, android.graphics.Outline outline) {
                     outline.setRoundRect(
                             0, 0, view.getWidth(), view.getHeight(),
-                            Math.min(radius, view.getHeight() / 2f)
+                            view.getHeight() / 2f
                     );
                 }
             });
@@ -955,14 +1018,16 @@ public final class FloatingIosBottomNavHook {
             surfaceTint = new View(context);
             GradientDrawable surface = new GradientDrawable();
             surface.setShape(GradientDrawable.RECTANGLE);
-            surface.setCornerRadius(radius);
+            surface.setCornerRadius(dp(context, 100));
             surface.setColor(isLightTheme(context) ? 0x66FAFAFA : 0x66121212);
-            surface.setStroke(
-                    dp(context, 1),
-                    isLightTheme(context) ? 0x30000000 : 0x55FFFFFF
-            );
             surfaceTint.setBackground(surface);
             addView(surfaceTint, new FrameLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.MATCH_PARENT
+            ));
+
+            bodyChrome = new KyantChromeView(context, false);
+            addView(bodyChrome, new FrameLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
                     ViewGroup.LayoutParams.MATCH_PARENT
             ));
@@ -990,29 +1055,17 @@ public final class FloatingIosBottomNavHook {
             });
             selectionLens.setClipToOutline(true);
 
-            lensSurfaceDrawable = new GradientDrawable();
-            lensSurfaceDrawable.setCornerRadius(dp(context, 32));
-            lensSurfaceDrawable.setColor(
-                    isLightTheme(context) ? 0x1A000000 : 0x1AFFFFFF
-            );
-            lensSurfaceDrawable.setStroke(
-                    dp(context, 1),
-                    isLightTheme(context) ? 0x26000000 : 0x40FFFFFF
-            );
             selectorHost.addView(selectionLens, new FrameLayout.LayoutParams(1, 1));
 
-            // Crema draws the selector surface after the refracted backdrop. Keeping the
-            // surface as a sibling prevents its tint/border from being fed back through the
-            // selector RuntimeShader.
-            selectionSurface = new View(context);
-            selectionSurface.setBackground(lensSurfaceDrawable);
-            selectionSurface.setVisibility(View.INVISIBLE);
-            selectionSurface.setClickable(false);
-            selectionSurface.setFocusable(false);
-            selectionSurface.setImportantForAccessibility(
+            selectorChrome = new KyantChromeView(context, true);
+            selectorChrome.setVisibility(View.INVISIBLE);
+            selectorChrome.setImportantForAccessibility(
                     View.IMPORTANT_FOR_ACCESSIBILITY_NO
             );
-            selectorHost.addView(selectionSurface, new FrameLayout.LayoutParams(1, 1));
+            selectorHost.addView(selectorChrome, new FrameLayout.LayoutParams(1, 1));
+
+            // Do not use platform elevation here. Android's ambient/spot elevation shadow
+            // produces a large halo while Kyant draws a controlled blurred capsule shadow.
 
             // Kyant: velocityAnimation spring(0.5f, 300f).
             velocitySpring = new SpringAnimation(velocityValueHolder);
@@ -1059,8 +1112,9 @@ public final class FloatingIosBottomNavHook {
             pressProgressSpring.addUpdateListener((animation, value, velocity) -> {
                 pressProgress = Math.max(0f, Math.min(1f, value));
                 selectionLens.setInteractionProgress(pressProgress);
-                updateLensSurface(pressProgress);
-                updatePanelTransform();
+                selectorChrome.setPressProgress(pressProgress);
+                applyOuterPressTransform();
+                updateCompositorVideoGlassGeometry();
             });
 
             pressScaleXSpring = new SpringAnimation(pressScaleXValue);
@@ -1083,16 +1137,6 @@ public final class FloatingIosBottomNavHook {
                 applyKyantTransform();
             });
 
-            panelOffsetSpring = new SpringAnimation(panelOffsetValue);
-            panelOffsetSpring.setSpring(new SpringForce()
-                    .setDampingRatio(1f)
-                    .setStiffness(300f));
-            panelOffsetSpring.setMinimumVisibleChange(0.5f);
-            panelOffsetSpring.addUpdateListener((animation, value, velocity) -> {
-                panelOffsetRaw = value;
-                updatePanelTransform();
-            });
-
             highlightProgressSpring = new SpringAnimation(highlightProgressValue);
             highlightProgressSpring.setSpring(new SpringForce()
                     .setDampingRatio(0.5f)
@@ -1100,7 +1144,7 @@ public final class FloatingIosBottomNavHook {
             highlightProgressSpring.setMinimumVisibleChange(0.001f);
             highlightProgressSpring.addUpdateListener((animation, value, velocity) -> {
                 highlightProgress = Math.max(0f, Math.min(1f, value));
-                invalidate();
+                updateInteractiveHighlight();
             });
 
             preDrawListener = () -> {
@@ -1136,19 +1180,6 @@ public final class FloatingIosBottomNavHook {
                 }
                 return true;
             };
-        }
-
-        @Override
-        protected void dispatchDraw(Canvas canvas) {
-            super.dispatchDraw(canvas);
-            drawInteractiveHighlight(
-                    canvas,
-                    0f,
-                    0f,
-                    getWidth(),
-                    getHeight(),
-                    highlightProgress
-            );
         }
 
         void setPresentationEnforcer(Runnable enforcer) {
@@ -1244,6 +1275,7 @@ public final class FloatingIosBottomNavHook {
 
         void dispose() {
             detachListener();
+            restoreReelCenterCompensation();
             if (selectorHost.getParent() instanceof ViewGroup) {
                 ((ViewGroup) selectorHost.getParent()).removeView(selectorHost);
             }
@@ -1252,11 +1284,14 @@ public final class FloatingIosBottomNavHook {
             pressProgressSpring.cancel();
             pressScaleXSpring.cancel();
             pressScaleYSpring.cancel();
-            panelOffsetSpring.cancel();
             highlightProgressSpring.cancel();
             if (pixelCopyBuffer != null) {
                 pixelCopyBuffer.recycle();
                 pixelCopyBuffer = null;
+            }
+            if (pixelCopyFullSurfaceBuffer != null) {
+                pixelCopyFullSurfaceBuffer.recycle();
+                pixelCopyFullSurfaceBuffer = null;
             }
             if (textureVideoBuffer != null) {
                 textureVideoBuffer.recycle();
@@ -1264,22 +1299,16 @@ public final class FloatingIosBottomNavHook {
             }
             pixelCopySurface = null;
             textureVideo = null;
-            nativeBar.setTranslationX(nativeBarBaseTranslationX);
+            destroyCompositorVideoGlass();
             nativeBar.setScaleX(nativeBarBaseScaleX);
             nativeBar.setScaleY(nativeBarBaseScaleY);
-            setTranslationX(0f);
-            backdropView.setScaleX(1f);
-            backdropView.setScaleY(1f);
-            surfaceTint.setScaleX(1f);
-            surfaceTint.setScaleY(1f);
-
             liveBackdropNode = null;
             tabsGlassBackdropNode = null;
             tabsBackdropNode = null;
             tabsGlassEffectState = null;
-            backdropView.setLiveBackdrop(null, 0);
+            backdropView.setLiveBackdrop(null, 0, 0);
             backdropView.setSecondaryLiveBackdrop(null);
-            selectionLens.setLiveBackdrop(null, 0);
+            selectionLens.setLiveBackdrop(null, 0, 0);
             selectionLens.setSecondaryLiveBackdrop(null);
             backdropView.setSurfacePatch(null, null);
             selectionLens.setSurfacePatch(null, null);
@@ -1289,8 +1318,8 @@ public final class FloatingIosBottomNavHook {
                 snapshot.recycle();
                 snapshot = null;
             }
-            backdropView.setSnapshot(null, 0);
-            selectionLens.setSnapshot(null, 0);
+            backdropView.setSnapshot(null, 0, 0);
+            selectionLens.setSnapshot(null, 0, 0);
         }
 
         void requestCapture() {
@@ -1301,6 +1330,20 @@ public final class FloatingIosBottomNavHook {
         }
 
         void onNativeTabClicked(View directTab) {
+            lastNativeNavigationAt = SystemClock.uptimeMillis();
+
+            int clipsId = resourceId(getContext(), "clips_tab");
+            if (clipsId != 0 && directTab.getId() != clipsId) {
+                // This is the only authoritative "we left Reels" signal available here.
+                // Release compositor/video state here instead of guessing from temporary
+                // SurfaceView detach events.
+                clearSurfacePatch();
+                clearTexturePatch();
+                setCompositorFallbackVisual(false);
+                destroyCompositorVideoGlass();
+                restoreReelCenterCompensation();
+            }
+
             List<View> tabs = visibleNativeTabs(nativeBar);
             int index = tabs.indexOf(directTab);
             if (index < 0) return;
@@ -1394,21 +1437,18 @@ public final class FloatingIosBottomNavHook {
                         this::drawBackdropSource
                 );
 
-                final int hiddenHeight = Math.max(
+                int hiddenHeight = Math.max(
                         1,
                         Math.min(dp(getContext(), 56), height)
                 );
-                final int hiddenTop = Math.max(0, (height - hiddenHeight) / 2);
-                final float density =
-                        getResources().getDisplayMetrics().density;
-                final float blurPadding = 8f * density;
-                final float lensHeight =
+                int hiddenTop = Math.max(0, (height - hiddenHeight) / 2);
+                float density = getResources().getDisplayMetrics().density;
+                float blurPadding = 8f * density;
+                float lensHeight =
                         Build.VERSION.SDK_INT >= 33
                                 ? 24f * density * pressProgress
                                 : 0f;
-                // This matches Backdrop's padding math: vibrancy -> blur(8), then
-                // lens(24 * progress) consumes that padding as its height grows.
-                final int hiddenPadding =
+                int hiddenPadding =
                         Build.VERSION.SDK_INT >= 31
                                 ? Math.max(
                                         0,
@@ -1420,7 +1460,7 @@ public final class FloatingIosBottomNavHook {
                         tabsGlassBackdropNode,
                         width + hiddenPadding * 2,
                         hiddenHeight + hiddenPadding * 2,
-                        canvas -> drawHiddenTabsGlassSource(
+                        canvas -> drawHiddenGlassSource(
                                 canvas,
                                 hiddenTop,
                                 hiddenPadding
@@ -1466,16 +1506,17 @@ public final class FloatingIosBottomNavHook {
                 if (!loggedCombinedBackdrop) {
                     loggedCombinedBackdrop = true;
                     ModuleLog.line(
-                            "(InstaLy | FloatingNav): selector backdrop=page+hiddenGlassTabs (Crema architecture)"
+                            "(InstaLy | FloatingNav): selector backdrop=page+exportedHiddenTabs (Kyant catalog)"
                     );
                 }
 
-                backdropView.setLiveBackdrop(liveBackdropNode, 0);
+                backdropView.setLiveBackdrop(liveBackdropNode, 0, 0);
                 backdropView.setSecondaryLiveBackdrop(null);
 
                 selectionLens.setLiveBackdrop(
                         liveBackdropNode,
-                        selectorSampleOffsetX()
+                        Math.round(selectionLens.getX()),
+                        Math.round(selectionLens.getY())
                 );
                 selectionLens.setSecondaryLiveBackdrop(tabsBackdropNode);
                 return true;
@@ -1485,11 +1526,12 @@ public final class FloatingIosBottomNavHook {
                 tabsGlassBackdropNode = null;
                 tabsBackdropNode = null;
                 tabsGlassEffectState = null;
-                backdropView.setLiveBackdrop(null, 0);
+                backdropView.setLiveBackdrop(null, 0, 0);
                 backdropView.setSecondaryLiveBackdrop(null);
                 selectionLens.setLiveBackdrop(
                         null,
-                        selectorSampleOffsetX()
+                        Math.round(selectionLens.getX()),
+                        Math.round(selectionLens.getY())
                 );
                 selectionLens.setSecondaryLiveBackdrop(null);
                 long now = SystemClock.uptimeMillis();
@@ -1504,7 +1546,7 @@ public final class FloatingIosBottomNavHook {
             }
         }
 
-        private void drawHiddenTabsGlassSource(
+        private void drawHiddenGlassSource(
                 Canvas canvas,
                 int hiddenTop,
                 int hiddenPadding
@@ -1548,21 +1590,39 @@ public final class FloatingIosBottomNavHook {
                 canvas.restoreToCount(glassSave);
             }
 
-            Paint surfacePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
-            surfacePaint.setColor(
+            Paint surface = new Paint(Paint.ANTI_ALIAS_FLAG);
+            surface.setColor(
                     isLightTheme(getContext()) ? 0x66FAFAFA : 0x66121212
             );
-            canvas.drawRoundRect(body, radius, radius, surfacePaint);
+            canvas.drawRoundRect(body, radius, radius, surface);
 
-            drawInteractiveHighlight(
-                    canvas,
-                    body.left,
-                    body.top,
-                    body.right,
-                    body.bottom,
-                    highlightProgress
-            );
+            if (Build.VERSION.SDK_INT >= 33) {
+                if (hiddenInteractiveShader == null) {
+                    hiddenInteractiveShader = new RuntimeShader(
+                            KyantChromeView.INTERACTIVE_HIGHLIGHT_SHADER
+                    );
+                }
+                if (hiddenEdgeShader == null) {
+                    hiddenEdgeShader = new RuntimeShader(
+                            Api33Effects.DEFAULT_HIGHLIGHT_SHADER
+                    );
+                }
+            }
+
+            // Do not port Kyant's row-level InteractiveHighlight through PorterDuff.ADD here.
+            // On the native View backend it becomes a conspicuous white halo during drag.
+            // Keep the actual selector optics (lens/highlight/shadows) instead.
             drawAccentTabsBackdrop(canvas);
+
+            KyantChromeView.drawDefaultHighlight(
+                    canvas,
+                    body,
+                    hiddenHighlightPaint,
+                    hiddenEdgeShader,
+                    pressProgress,
+                    getResources().getDisplayMetrics().density
+            );
+
             canvas.restoreToCount(save);
         }
 
@@ -1574,8 +1634,8 @@ public final class FloatingIosBottomNavHook {
             getLocationInWindow(layerLocation);
 
             int accentColor = isLightTheme(getContext())
-                    ? Color.rgb(0, 122, 255)
-                    : Color.rgb(10, 132, 255);
+                    ? Color.rgb(0, 136, 255)
+                    : Color.rgb(0, 145, 255);
 
             Paint tintPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
             tintPaint.setColorFilter(
@@ -1632,10 +1692,11 @@ public final class FloatingIosBottomNavHook {
                 Canvas canvas = new Canvas(snapshot);
                 drawBackdropSource(canvas);
 
-                backdropView.setSnapshot(snapshot, 0);
+                backdropView.setSnapshot(snapshot, 0, 0);
                 selectionLens.setSnapshot(
                         snapshot,
-                        selectorSampleOffsetX()
+                        Math.round(selectionLens.getX()),
+                        Math.round(selectionLens.getY())
                 );
             } catch (Throwable t) {
                 ModuleLog.line("(InstaLy | FloatingNav): bitmap backdrop fallback failed", t);
@@ -1727,17 +1788,1099 @@ public final class FloatingIosBottomNavHook {
                     layerLocation[1] + getHeight()
             );
 
-            View video = findTopmostIntersectingVideoView(captureRoot, layerRect);
-            if (video instanceof SurfaceView) {
-                clearTexturePatch();
-                captureSurfaceVideo((SurfaceView) video);
-            } else if (video instanceof TextureView) {
-                clearSurfacePatch();
-                captureTextureVideo((TextureView) video);
-            } else {
-                clearSurfacePatch();
-                clearTexturePatch();
+            View searchRoot = captureRoot.getRootView();
+            if (searchRoot == null) {
+                searchRoot = captureRoot;
             }
+
+            List<View> candidates = new ArrayList<>();
+            collectIntersectingVideoViews(searchRoot, layerRect, candidates);
+            logVideoCandidates(candidates);
+
+            long now = SystemClock.uptimeMillis();
+            if (candidates.isEmpty()) {
+                if (isReelsTabSelected()
+                        && (compositorVideoGlassActive
+                                || videoUsesCompositorFallback)) {
+                    // Instagram can remove the SurfaceView from the View tree for multiple
+                    // seconds while the same Reel is still visible in SurfaceFlinger. Do not
+                    // destroy material state until the user actually leaves clips_tab.
+                    logVideoBackdropMode(
+                            "SurfaceControl/latched-on-reels-tab"
+                    );
+                    return;
+                }
+
+                clearSurfacePatch();
+                clearTexturePatch();
+                setCompositorFallbackVisual(false);
+                destroyCompositorVideoGlass();
+                restoreReelCenterCompensation();
+                logVideoBackdropMode("none/view-tree");
+                return;
+            }
+
+            lastVideoCandidateSeenAt = now;
+            updateReelCenterCompensation(candidates);
+
+            // Once compositor fallback is active, keep its geometry live every frame but only
+            // probe PixelCopy twice per second. Repeated ERROR_SOURCE_NO_DATA at 60 Hz wastes
+            // work and cannot manufacture a producer buffer.
+            if (compositorVideoGlassActive
+                    && SystemClock.uptimeMillis() - lastPixelCopyAt < 500L) {
+                updateCompositorVideoGlassGeometry();
+                return;
+            }
+
+            if (!pixelCopyInFlight) {
+                tryCaptureVideoCandidate(candidates, 0, layerRect);
+            }
+        }
+
+        private void updateReelCenterCompensation(List<View> candidates) {
+            if (removedBottomReservationPx <= 0 || !isReelsTabSelected()) {
+                restoreReelCenterCompensation();
+                return;
+            }
+
+            SurfaceView largest = null;
+            long largestArea = -1L;
+            for (View candidate : candidates) {
+                if (!(candidate instanceof SurfaceView)
+                        || !candidate.isAttachedToWindow()) {
+                    continue;
+                }
+                long area = (long) candidate.getWidth()
+                        * (long) candidate.getHeight();
+                if (area > largestArea) {
+                    largestArea = area;
+                    largest = (SurfaceView) candidate;
+                }
+            }
+
+            if (largest == null) {
+                return;
+            }
+
+            if (compensatedReelSurface != largest) {
+                restoreReelCenterCompensation();
+                compensatedReelSurface = largest;
+                compensatedReelBaseTranslationY = largest.getTranslationY();
+
+                // We removed a bottom-only reservation of R pixels. A vertically-centered Reel
+                // therefore moves down by R/2 when its viewport grows downward by R. Offset the
+                // Reel by exactly -R/2 to preserve Instagram's original visual center while
+                // still allowing content behind the floating navbar.
+                float compensation = removedBottomReservationPx / 2f;
+                largest.setTranslationY(
+                        compensatedReelBaseTranslationY - compensation
+                );
+                ModuleLog.line(
+                        "(InstaLy | FloatingNav): Reel center compensation=-"
+                                + compensation
+                                + "px (removed reservation="
+                                + removedBottomReservationPx
+                                + "px)"
+                );
+            }
+        }
+
+        private boolean isReelsTabSelected() {
+            int clipsId = resourceId(getContext(), "clips_tab");
+            if (clipsId == 0) return false;
+
+            List<View> tabs = visibleNativeTabs(nativeBar);
+            for (int i = 0; i < tabs.size(); i++) {
+                View tab = tabs.get(i);
+                if (tab.getId() != clipsId) continue;
+                return hasSelectedState(tab)
+                        || visualSelectedTabIndex == i;
+            }
+            return false;
+        }
+
+        private void restoreReelCenterCompensation() {
+            SurfaceView surface = compensatedReelSurface;
+            if (surface != null) {
+                try {
+                    surface.setTranslationY(
+                            compensatedReelBaseTranslationY
+                    );
+                } catch (Throwable ignored) {}
+            }
+            compensatedReelSurface = null;
+            compensatedReelBaseTranslationY = 0f;
+        }
+
+        private boolean shouldHoldCompositorVideoGlass(long now) {
+            return isReelsTabSelected()
+                    && (compositorVideoGlassActive
+                            || videoUsesCompositorFallback);
+        }
+
+        private void tryCaptureVideoCandidate(
+                List<View> candidates,
+                int index,
+                Rect layerRect
+        ) {
+            if (index >= candidates.size()) {
+                SurfaceView fallback = null;
+                for (View candidate : candidates) {
+                    if (candidate instanceof SurfaceView) {
+                        fallback = (SurfaceView) candidate;
+                        break;
+                    }
+                }
+
+                clearSurfacePatch();
+                clearTexturePatch();
+                if (fallback != null) {
+                    boolean validFallback = false;
+                    try {
+                        android.view.Surface s =
+                                fallback.getHolder() != null
+                                        ? fallback.getHolder().getSurface()
+                                        : null;
+                        validFallback = fallback.isAttachedToWindow()
+                                && s != null
+                                && s.isValid();
+                    } catch (Throwable ignored) {}
+
+                    if (validFallback) {
+                        ensureCompositorVideoGlass(fallback);
+                    } else if (!shouldHoldCompositorVideoGlass(
+                            SystemClock.uptimeMillis()
+                    )) {
+                        destroyCompositorVideoGlass();
+                    }
+
+                    setCompositorFallbackVisual(
+                            compositorVideoGlassActive
+                                    || shouldHoldCompositorVideoGlass(
+                                            SystemClock.uptimeMillis()
+                                    )
+                    );
+                    logVideoBackdropMode(
+                            compositorVideoGlassActive
+                                    ? "SurfaceControl/background-blur"
+                                    : "video-candidates-unreadable"
+                    );
+                } else {
+                    setCompositorFallbackVisual(false);
+                    destroyCompositorVideoGlass();
+                    logVideoBackdropMode("video-candidates-unreadable");
+                }
+                return;
+            }
+
+            View candidate = candidates.get(index);
+            if (candidate instanceof TextureView) {
+                if (tryCaptureTextureCandidate(
+                        (TextureView) candidate,
+                        layerRect
+                )) {
+                    setCompositorFallbackVisual(false);
+                    destroyCompositorVideoGlass();
+                    return;
+                }
+                tryCaptureVideoCandidate(candidates, index + 1, layerRect);
+                return;
+            }
+
+            if (!(candidate instanceof SurfaceView)) {
+                tryCaptureVideoCandidate(candidates, index + 1, layerRect);
+                return;
+            }
+
+            SurfaceView surface = (SurfaceView) candidate;
+            if (!surface.isAttachedToWindow()
+                    || surface.getWidth() <= 1
+                    || surface.getHeight() <= 1
+                    || surface.getHolder() == null
+                    || surface.getHolder().getSurface() == null
+                    || !surface.getHolder().getSurface().isValid()) {
+                tryCaptureVideoCandidate(candidates, index + 1, layerRect);
+                return;
+            }
+
+            int[] surfaceLocation = new int[2];
+            surface.getLocationInWindow(surfaceLocation);
+            Rect surfaceRect = new Rect(
+                    surfaceLocation[0],
+                    surfaceLocation[1],
+                    surfaceLocation[0] + surface.getWidth(),
+                    surfaceLocation[1] + surface.getHeight()
+            );
+            Rect overlap = new Rect();
+            if (!overlap.setIntersect(layerRect, surfaceRect)
+                    || overlap.width() <= 1
+                    || overlap.height() <= 1) {
+                tryCaptureVideoCandidate(candidates, index + 1, layerRect);
+                return;
+            }
+
+            Rect sourceRect = new Rect(
+                    overlap.left - surfaceRect.left,
+                    overlap.top - surfaceRect.top,
+                    overlap.right - surfaceRect.left,
+                    overlap.bottom - surfaceRect.top
+            );
+            Rect destinationRect = new Rect(
+                    overlap.left - layerRect.left,
+                    overlap.top - layerRect.top,
+                    overlap.right - layerRect.left,
+                    overlap.bottom - layerRect.top
+            );
+
+            int copyWidth = Math.max(2, destinationRect.width());
+            int copyHeight = Math.max(2, destinationRect.height());
+            if (pixelCopyBuffer == null
+                    || pixelCopyBuffer.isRecycled()
+                    || pixelCopyBuffer.getWidth() != copyWidth
+                    || pixelCopyBuffer.getHeight() != copyHeight) {
+                if (pixelCopyBuffer != null && !pixelCopyBuffer.isRecycled()) {
+                    pixelCopyBuffer.recycle();
+                }
+                pixelCopyBuffer = Bitmap.createBitmap(
+                        copyWidth,
+                        copyHeight,
+                        Bitmap.Config.ARGB_8888
+                );
+            }
+
+            pixelCopySurface = surface;
+            pixelCopyInFlight = true;
+            lastPixelCopyAt = SystemClock.uptimeMillis();
+            Bitmap destination = pixelCopyBuffer;
+
+            try {
+                PixelCopy.request(
+                        surface,
+                        sourceRect,
+                        destination,
+                        result -> {
+                            pixelCopyInFlight = false;
+                            if (result == PixelCopy.SUCCESS
+                                    && !destination.isRecycled()
+                                    && surface.isAttachedToWindow()) {
+                                setCompositorFallbackVisual(false);
+                                destroyCompositorVideoGlass();
+                                publishSurfaceVideoPatch(
+                                        surface,
+                                        destination,
+                                        destinationRect,
+                                        "SurfaceView/PixelCopy-candidate-" + index
+                                );
+                                return;
+                            }
+
+                            // AOSP defines result=3 as ERROR_SOURCE_NO_DATA: no buffer was queued
+                            // to this Surface. Trying another overload of the same Surface cannot
+                            // change that; move to the next candidate.
+                            tryCaptureVideoCandidate(
+                                    candidates,
+                                    index + 1,
+                                    layerRect
+                            );
+                        },
+                        mainHandler
+                );
+            } catch (Throwable ignored) {
+                pixelCopyInFlight = false;
+                tryCaptureVideoCandidate(candidates, index + 1, layerRect);
+            }
+        }
+
+        private boolean tryCaptureTextureCandidate(
+                TextureView texture,
+                Rect layerRect
+        ) {
+            if (!texture.isAvailable()
+                    || texture.getWidth() <= 1
+                    || texture.getHeight() <= 1) {
+                return false;
+            }
+
+            int[] textureLocation = new int[2];
+            texture.getLocationInWindow(textureLocation);
+            Rect textureRect = new Rect(
+                    textureLocation[0],
+                    textureLocation[1],
+                    textureLocation[0] + texture.getWidth(),
+                    textureLocation[1] + texture.getHeight()
+            );
+            Rect overlap = new Rect();
+            if (!overlap.setIntersect(layerRect, textureRect)
+                    || overlap.width() <= 1
+                    || overlap.height() <= 1) {
+                return false;
+            }
+
+            Bitmap full = null;
+            try {
+                full = texture.getBitmap();
+                if (full == null || full.isRecycled()) return false;
+
+                int copyWidth = Math.max(2, overlap.width());
+                int copyHeight = Math.max(2, overlap.height());
+                if (textureVideoBuffer == null
+                        || textureVideoBuffer.isRecycled()
+                        || textureVideoBuffer.getWidth() != copyWidth
+                        || textureVideoBuffer.getHeight() != copyHeight) {
+                    if (textureVideoBuffer != null
+                            && !textureVideoBuffer.isRecycled()) {
+                        textureVideoBuffer.recycle();
+                    }
+                    textureVideoBuffer = Bitmap.createBitmap(
+                            copyWidth,
+                            copyHeight,
+                            Bitmap.Config.ARGB_8888
+                    );
+                }
+
+                Rect sourceRect = new Rect(
+                        overlap.left - textureRect.left,
+                        overlap.top - textureRect.top,
+                        overlap.right - textureRect.left,
+                        overlap.bottom - textureRect.top
+                );
+                Canvas crop = new Canvas(textureVideoBuffer);
+                crop.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
+                crop.drawBitmap(
+                        full,
+                        sourceRect,
+                        new Rect(0, 0, copyWidth, copyHeight),
+                        new Paint(
+                                Paint.ANTI_ALIAS_FLAG
+                                        | Paint.FILTER_BITMAP_FLAG
+                        )
+                );
+
+                textureVideo = texture;
+                textureVideoDestination = new Rect(
+                        overlap.left - layerRect.left,
+                        overlap.top - layerRect.top,
+                        overlap.right - layerRect.left,
+                        overlap.bottom - layerRect.top
+                );
+                logVideoBackdropMode("TextureView/getBitmap-candidate");
+                backdropView.setTexturePatch(
+                        textureVideoBuffer,
+                        textureVideoDestination
+                );
+                selectionLens.setTexturePatch(
+                        textureVideoBuffer,
+                        textureVideoDestination
+                );
+                postOnAnimation(this::captureBackdrop);
+                return true;
+            } catch (Throwable ignored) {
+                return false;
+            } finally {
+                if (full != null && !full.isRecycled()) {
+                    full.recycle();
+                }
+            }
+        }
+
+        private void ensureCompositorVideoGlass(SurfaceView surface) {
+            if (Build.VERSION.SDK_INT < 31 || surface == null) {
+                destroyCompositorVideoGlass();
+                return;
+            }
+
+            boolean sourceReady = surface.isAttachedToWindow();
+            try {
+                android.view.Surface holderSurface =
+                        surface.getHolder() != null
+                                ? surface.getHolder().getSurface()
+                                : null;
+                sourceReady &= holderSurface != null && holderSurface.isValid();
+            } catch (Throwable ignored) {
+                sourceReady = false;
+            }
+
+            if (!sourceReady) {
+                // Instagram often exposes the replacement SurfaceView ~50-150ms before its
+                // producer becomes valid. Keep the old compositor material until that happens.
+                return;
+            }
+
+            if (compositorVideoGlassActive
+                    && compositorVideoSurface == surface
+                    && compositorBodyLayer != null
+                    && compositorSelectorLayer != null) {
+                updateCompositorVideoGlassGeometry();
+                return;
+            }
+
+            destroyCompositorVideoGlass();
+
+            try {
+                Object parent = surface.getSurfaceControl();
+                if (parent == null) return;
+
+                compositorBodyLayer = createCompositorEffectLayer(
+                        parent,
+                        "InstaLy-VideoGlassBody"
+                );
+                compositorSelectorLayer = createCompositorEffectLayer(
+                        parent,
+                        "InstaLy-VideoGlassSelector"
+                );
+
+                compositorRootAttachment =
+                        getRootAttachedSurfaceControl();
+                compositorSelectorMirror =
+                        createLiveVideoMirror(
+                                parent,
+                                compositorRootAttachment
+                        );
+
+                if (compositorBodyLayer == null
+                        || compositorSelectorLayer == null) {
+                    destroyCompositorVideoGlass();
+                    return;
+                }
+
+                compositorVideoSurface = surface;
+                compositorVideoGlassActive = true;
+                lastVideoCandidateSeenAt = SystemClock.uptimeMillis();
+                ModuleLog.line(
+                        "(InstaLy | FloatingNav): Reel glass material=latched"
+                );
+                updateCompositorVideoGlassGeometry();
+            } catch (Throwable t) {
+                destroyCompositorVideoGlass();
+                logCompositorGlassFailure(t);
+            }
+        }
+
+        private Object createCompositorEffectLayer(
+                Object parent,
+                String name
+        ) throws Throwable {
+            Class<?> builderClass =
+                    Class.forName("android.view.SurfaceControl$Builder");
+            Object builder = XposedHelpers.newInstance(builderClass);
+            XposedHelpers.callMethod(builder, "setName", name);
+            XposedHelpers.callMethod(builder, "setParent", parent);
+            XposedHelpers.callMethod(builder, "setEffectLayer");
+            XposedHelpers.callMethod(builder, "setHidden", false);
+            return XposedHelpers.callMethod(builder, "build");
+        }
+
+        private Object getRootAttachedSurfaceControl() {
+            if (Build.VERSION.SDK_INT < 31) return null;
+            try {
+                // Public API since Android 12. Returned object is AttachedSurfaceControl, whose
+                // buildReparentTransaction() exists specifically for app-created SurfaceControls.
+                return XposedHelpers.callMethod(
+                        captureRoot,
+                        "getRootSurfaceControl"
+                );
+            } catch (Throwable t) {
+                long now = SystemClock.uptimeMillis();
+                if (now - lastCompositorRefractionFailureLogAt > 3000L) {
+                    lastCompositorRefractionFailureLogAt = now;
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): root AttachedSurfaceControl unavailable",
+                            t
+                    );
+                }
+                return null;
+            }
+        }
+
+        private Object createLiveVideoMirror(
+                Object source,
+                Object rootAttachment
+        ) {
+            if (source == null || rootAttachment == null) {
+                ModuleLog.line(
+                        "(InstaLy | FloatingNav): live selector mirror unavailable: missing root attachment"
+                );
+                return null;
+            }
+
+            Object mirror = null;
+            try {
+                Class<?> surfaceControlClass =
+                        Class.forName("android.view.SurfaceControl");
+                mirror = XposedHelpers.callStaticMethod(
+                        surfaceControlClass,
+                        "mirrorSurface",
+                        source
+                );
+                if (mirror == null) {
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): live selector mirror unavailable: mirrorSurface returned null"
+                    );
+                    return null;
+                }
+
+                // Do not reach into ViewRootImpl. AttachedSurfaceControl is Android's supported
+                // way to attach an app-created SurfaceControl to this exact View hierarchy.
+                Object tx = XposedHelpers.callMethod(
+                        rootAttachment,
+                        "buildReparentTransaction",
+                        mirror
+                );
+                if (tx == null) {
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): live selector mirror unavailable: root reparent transaction=null"
+                    );
+                    try {
+                        XposedHelpers.callMethod(mirror, "release");
+                    } catch (Throwable ignored) {}
+                    return null;
+                }
+
+                // SurfaceView defaults below the ViewRoot buffer. Layer -1 on the attached root
+                // keeps this mirror below normal View UI while above the usual SurfaceView
+                // sublayer, so native Instagram icons remain authoritative foreground.
+                XposedHelpers.callMethod(tx, "setLayer", mirror, -1);
+                XposedHelpers.callMethod(tx, "setAlpha", mirror, 0f);
+                XposedHelpers.callMethod(tx, "show", mirror);
+
+                boolean scheduled = false;
+                try {
+                    Object result = XposedHelpers.callMethod(
+                            rootAttachment,
+                            "applyTransactionOnDraw",
+                            tx
+                    );
+                    scheduled = !(result instanceof Boolean)
+                            || (Boolean) result;
+                } catch (Throwable applyOnDrawFailure) {
+                    XposedHelpers.callMethod(tx, "apply");
+                    scheduled = true;
+                }
+
+                captureRoot.invalidate();
+
+                if (!scheduled) {
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): live selector mirror unavailable: root transaction rejected"
+                    );
+                    try {
+                        XposedHelpers.callMethod(mirror, "release");
+                    } catch (Throwable ignored) {}
+                    return null;
+                }
+
+                ModuleLog.line(
+                        "(InstaLy | FloatingNav): live selector mirror=attached"
+                );
+                return mirror;
+            } catch (Throwable t) {
+                if (mirror != null) {
+                    try {
+                        XposedHelpers.callMethod(mirror, "release");
+                    } catch (Throwable ignored) {}
+                }
+                long now = SystemClock.uptimeMillis();
+                if (now - lastCompositorRefractionFailureLogAt > 3000L) {
+                    lastCompositorRefractionFailureLogAt = now;
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): live selector mirror attach failed",
+                            t
+                    );
+                }
+                return null;
+            }
+        }
+
+        private void updateCompositorVideoGlassGeometry() {
+            if (!compositorVideoGlassActive
+                    || compositorVideoSurface == null
+                    || compositorBodyLayer == null
+                    || compositorSelectorLayer == null
+                    || !compositorVideoSurface.isAttachedToWindow()
+                    || getWidth() <= 1
+                    || getHeight() <= 1) {
+                return;
+            }
+
+            try {
+                int[] surfaceLocation = new int[2];
+                int[] layerLocation = new int[2];
+                compositorVideoSurface.getLocationInWindow(surfaceLocation);
+                getLocationInWindow(layerLocation);
+
+                float bodyX = layerLocation[0] - surfaceLocation[0];
+                float bodyY = layerLocation[1] - surfaceLocation[1];
+                int bodyWidth = Math.max(1, getWidth());
+                int bodyHeight = Math.max(1, getHeight());
+
+                float selectorX = bodyX + selectionLens.getX();
+                float selectorY = bodyY + selectionLens.getY();
+                int selectorWidth = Math.max(1, selectionLens.getWidth());
+                int selectorHeight = Math.max(1, selectionLens.getHeight());
+
+                Class<?> txClass =
+                        Class.forName("android.view.SurfaceControl$Transaction");
+                Object tx = XposedHelpers.newInstance(txClass);
+
+                float[] bodyColor =
+                        isLightTheme(getContext())
+                                ? new float[] {
+                                        250f / 255f,
+                                        250f / 255f,
+                                        250f / 255f
+                                }
+                                : new float[] {
+                                        18f / 255f,
+                                        18f / 255f,
+                                        18f / 255f
+                                };
+
+                configureCompositorEffectLayer(
+                        tx,
+                        compositorBodyLayer,
+                        bodyX,
+                        bodyY,
+                        bodyWidth,
+                        bodyHeight,
+                        bodyHeight / 2f,
+                        dp(getContext(), 8),
+                        1000000,
+                        bodyColor,
+                        0.40f
+                );
+
+                int scaledSelectorWidth = Math.max(
+                        1,
+                        Math.round(
+                                selectorWidth
+                                        * Math.abs(selectionLens.getScaleX())
+                        )
+                );
+                int scaledSelectorHeight = Math.max(
+                        1,
+                        Math.round(
+                                selectorHeight
+                                        * Math.abs(selectionLens.getScaleY())
+                        )
+                );
+                float scaledX =
+                        selectorX
+                                - (scaledSelectorWidth - selectorWidth) / 2f;
+                float scaledY =
+                        selectorY
+                                - (scaledSelectorHeight - selectorHeight) / 2f;
+
+                float selectorProgress =
+                        Math.max(0f, Math.min(1f, pressProgress));
+                float restAlpha = 0.10f * (1f - selectorProgress);
+                float pressBlackAlpha = 0.03f * selectorProgress;
+                float selectorAlpha =
+                        1f - (1f - restAlpha) * (1f - pressBlackAlpha);
+
+                float selectorGray = 0f;
+                if (!isLightTheme(getContext())
+                        && selectorAlpha > 0.0001f) {
+                    // White rest layer followed by Kyant's black pressed layer, converted to
+                    // one equivalent premultiplied gray+alpha compositor fill.
+                    selectorGray =
+                            restAlpha * (1f - pressBlackAlpha)
+                                    / selectorAlpha;
+                }
+                float[] selectorColor = new float[] {
+                        selectorGray,
+                        selectorGray,
+                        selectorGray
+                };
+
+                configureCompositorEffectLayer(
+                        tx,
+                        compositorSelectorLayer,
+                        scaledX,
+                        scaledY,
+                        scaledSelectorWidth,
+                        scaledSelectorHeight,
+                        scaledSelectorHeight / 2f,
+                        dp(getContext(), 14),
+                        1000001,
+                        selectorColor,
+                        selectorAlpha
+                );
+
+                configureCompositorSelectorRefraction(
+                        tx,
+                        surfaceLocation,
+                        layerLocation,
+                        scaledX,
+                        scaledY,
+                        scaledSelectorWidth,
+                        scaledSelectorHeight
+                );
+
+                XposedHelpers.callMethod(tx, "apply");
+                try {
+                    XposedHelpers.callMethod(tx, "close");
+                } catch (Throwable ignored) {}
+            } catch (Throwable t) {
+                logCompositorGlassFailure(t);
+                destroyCompositorVideoGlass();
+                setCompositorFallbackVisual(false);
+            }
+        }
+
+        private void configureCompositorSelectorRefraction(
+                Object tx,
+                int[] surfaceLocation,
+                int[] layerLocation,
+                float selectorXRelativeToSurface,
+                float selectorYRelativeToSurface,
+                int selectorWidth,
+                int selectorHeight
+        ) {
+            if (compositorSelectorMirror == null
+                    || compositorRootAttachment == null) {
+                return;
+            }
+
+            // Kyant's selector lens is press-dependent: 10dp refraction height / 14dp amount.
+            // SurfaceFlinger cannot run that AGSL over an unreadable SurfaceView, so use the
+            // live mirrored compositor hierarchy and magnify a slightly smaller source crop
+            // into the selector capsule. Alpha follows the same press spring, so rest=0 and
+            // drag=live optical displacement over the blurred base.
+            float p = Math.max(0f, Math.min(1f, pressProgress));
+            if (p <= 0.001f) {
+                XposedHelpers.callMethod(
+                        tx,
+                        "setAlpha",
+                        compositorSelectorMirror,
+                        0f
+                );
+                return;
+            }
+
+            float selectorWindowX =
+                    surfaceLocation[0] + selectorXRelativeToSurface;
+            float selectorWindowY =
+                    surfaceLocation[1] + selectorYRelativeToSurface;
+
+            float refractionAmount = dp(getContext(), 14) * p;
+            float insetX = Math.min(
+                    selectorWidth * 0.18f,
+                    refractionAmount * 0.70f
+            );
+            float insetY = Math.min(
+                    selectorHeight * 0.18f,
+                    refractionAmount * 0.55f
+            );
+
+            int sourceLeft = Math.max(
+                    0,
+                    Math.round(
+                            selectorWindowX
+                                    - surfaceLocation[0]
+                                    + insetX
+                    )
+            );
+            int sourceTop = Math.max(
+                    0,
+                    Math.round(
+                            selectorWindowY
+                                    - surfaceLocation[1]
+                                    + insetY
+                    )
+            );
+            int sourceRight = Math.min(
+                    compositorVideoSurface.getWidth(),
+                    Math.round(
+                            selectorWindowX
+                                    - surfaceLocation[0]
+                                    + selectorWidth
+                                    - insetX
+                    )
+            );
+            int sourceBottom = Math.min(
+                    compositorVideoSurface.getHeight(),
+                    Math.round(
+                            selectorWindowY
+                                    - surfaceLocation[1]
+                                    + selectorHeight
+                                    - insetY
+                    )
+            );
+
+            if (sourceRight - sourceLeft <= 1
+                    || sourceBottom - sourceTop <= 1) {
+                XposedHelpers.callMethod(
+                        tx,
+                        "setAlpha",
+                        compositorSelectorMirror,
+                        0f
+                );
+                return;
+            }
+
+            View rootView = captureRoot.getRootView();
+            int[] rootLocation = new int[2];
+            rootView.getLocationInWindow(rootLocation);
+
+            Rect sourceCrop = new Rect(
+                    sourceLeft,
+                    sourceTop,
+                    sourceRight,
+                    sourceBottom
+            );
+            Rect destFrame = new Rect(
+                    Math.round(selectorWindowX - rootLocation[0]),
+                    Math.round(selectorWindowY - rootLocation[1]),
+                    Math.round(
+                            selectorWindowX
+                                    - rootLocation[0]
+                                    + selectorWidth
+                    ),
+                    Math.round(
+                            selectorWindowY
+                                    - rootLocation[1]
+                                    + selectorHeight
+                    )
+            );
+
+            boolean geometryApplied = false;
+            try {
+                XposedHelpers.callMethod(
+                        tx,
+                        "setGeometry",
+                        compositorSelectorMirror,
+                        sourceCrop,
+                        destFrame,
+                        0
+                );
+                geometryApplied = true;
+            } catch (Throwable geometryFailure) {
+                try {
+                    float scaleX =
+                            destFrame.width()
+                                    / (float) Math.max(
+                                            1,
+                                            sourceCrop.width()
+                                    );
+                    float scaleY =
+                            destFrame.height()
+                                    / (float) Math.max(
+                                            1,
+                                            sourceCrop.height()
+                                    );
+
+                    XposedHelpers.callMethod(
+                            tx,
+                            "setWindowCrop",
+                            compositorSelectorMirror,
+                            sourceCrop
+                    );
+                    XposedHelpers.callMethod(
+                            tx,
+                            "setMatrix",
+                            compositorSelectorMirror,
+                            scaleX,
+                            0f,
+                            0f,
+                            scaleY
+                    );
+                    XposedHelpers.callMethod(
+                            tx,
+                            "setPosition",
+                            compositorSelectorMirror,
+                            destFrame.left - sourceCrop.left * scaleX,
+                            destFrame.top - sourceCrop.top * scaleY
+                    );
+                    geometryApplied = true;
+                } catch (Throwable fallbackFailure) {
+                    long now = SystemClock.uptimeMillis();
+                    if (now - lastCompositorRefractionFailureLogAt > 3000L) {
+                        lastCompositorRefractionFailureLogAt = now;
+                        ModuleLog.line(
+                                "(InstaLy | FloatingNav): live selector refraction geometry unavailable",
+                                fallbackFailure
+                        );
+                    }
+                }
+            }
+
+            if (!geometryApplied) {
+                XposedHelpers.callMethod(
+                        tx,
+                        "setAlpha",
+                        compositorSelectorMirror,
+                        0f
+                );
+                return;
+            }
+
+            if (!loggedCompositorRefractionActive) {
+                loggedCompositorRefractionActive = true;
+                ModuleLog.line(
+                        "(InstaLy | FloatingNav): live selector refraction=active"
+                );
+            }
+
+            XposedHelpers.callMethod(
+                    tx,
+                    "setCornerRadius",
+                    compositorSelectorMirror,
+                    selectorHeight / 2f
+            );
+            XposedHelpers.callMethod(
+                    tx,
+                    "setAlpha",
+                    compositorSelectorMirror,
+                    p
+            );
+            XposedHelpers.callMethod(tx, "show", compositorSelectorMirror);
+        }
+
+        private void configureCompositorEffectLayer(
+                Object tx,
+                Object layer,
+                float x,
+                float y,
+                int width,
+                int height,
+                float cornerRadius,
+                int blurRadius,
+                int z,
+                float[] color,
+                float alpha
+        ) {
+            XposedHelpers.callMethod(tx, "setLayer", layer, z);
+            XposedHelpers.callMethod(tx, "setPosition", layer, x, y);
+            XposedHelpers.callMethod(
+                    tx,
+                    "setWindowCrop",
+                    layer,
+                    width,
+                    height
+            );
+            XposedHelpers.callMethod(
+                    tx,
+                    "setCornerRadius",
+                    layer,
+                    cornerRadius
+            );
+            XposedHelpers.callMethod(
+                    tx,
+                    "setBackgroundBlurRadius",
+                    layer,
+                    blurRadius
+            );
+
+            // AOSP EffectLayer is transparent by default. Give it the actual Kyant material
+            // color so the glass remains visible even when the device's background-blur
+            // contribution is weak or temporarily unavailable.
+            XposedHelpers.callMethod(
+                    tx,
+                    "setColor",
+                    layer,
+                    color
+            );
+            XposedHelpers.callMethod(
+                    tx,
+                    "setAlpha",
+                    layer,
+                    Math.max(0f, Math.min(1f, alpha))
+            );
+            XposedHelpers.callMethod(tx, "show", layer);
+        }
+
+        private void setCompositorFallbackVisual(boolean active) {
+            if (videoUsesCompositorFallback == active) {
+                return;
+            }
+            videoUsesCompositorFallback = active;
+
+            // PixelCopy cannot read Instagram's Reel Surface. Keep the stale raster source hidden,
+            // but never allow the material itself to collapse into plain transparency.
+            backdropView.setAlpha(active ? 0f : 1f);
+            if (selectionLens.getVisibility() == View.VISIBLE) {
+                selectionLens.setAlpha(active ? 0f : 1f);
+            }
+
+            GradientDrawable frost = new GradientDrawable();
+            frost.setShape(GradientDrawable.RECTANGLE);
+            frost.setCornerRadius(dp(getContext(), 100));
+
+            // Kyant's real material is 40% because a true backdrop is present. When the Reel
+            // Surface cannot be sampled, use a denser frosted fallback while compositor blur
+            // remains underneath. This prevents "transparent bar" on devices whose blur is weak.
+            frost.setColor(
+                    isLightTheme(getContext())
+                            ? (active ? 0xA6FAFAFA : 0x66FAFAFA)
+                            : (active ? 0xA6121212 : 0x66121212)
+            );
+            surfaceTint.setBackground(frost);
+        }
+
+        private void destroyCompositorVideoGlass() {
+            Object body = compositorBodyLayer;
+            Object selector = compositorSelectorLayer;
+            Object mirror = compositorSelectorMirror;
+            compositorBodyLayer = null;
+            compositorSelectorLayer = null;
+            compositorSelectorMirror = null;
+            compositorRootAttachment = null;
+            compositorVideoSurface = null;
+            compositorVideoGlassActive = false;
+            loggedCompositorRefractionActive = false;
+
+            if (body == null && selector == null && mirror == null) return;
+
+            try {
+                Class<?> txClass =
+                        Class.forName("android.view.SurfaceControl$Transaction");
+                Object tx = XposedHelpers.newInstance(txClass);
+                if (body != null) {
+                    try {
+                        XposedHelpers.callMethod(tx, "remove", body);
+                    } catch (Throwable ignored) {}
+                }
+                if (selector != null) {
+                    try {
+                        XposedHelpers.callMethod(tx, "remove", selector);
+                    } catch (Throwable ignored) {}
+                }
+                if (mirror != null) {
+                    try {
+                        XposedHelpers.callMethod(tx, "remove", mirror);
+                    } catch (Throwable ignored) {}
+                }
+                XposedHelpers.callMethod(tx, "apply");
+                try {
+                    XposedHelpers.callMethod(tx, "close");
+                } catch (Throwable ignored) {}
+            } catch (Throwable ignored) {}
+
+            if (body != null) {
+                try {
+                    XposedHelpers.callMethod(body, "release");
+                } catch (Throwable ignored) {}
+            }
+            if (selector != null) {
+                try {
+                    XposedHelpers.callMethod(selector, "release");
+                } catch (Throwable ignored) {}
+            }
+            if (mirror != null) {
+                try {
+                    XposedHelpers.callMethod(mirror, "release");
+                } catch (Throwable ignored) {}
+            }
+        }
+
+        private void logCompositorGlassFailure(Throwable t) {
+            long now = SystemClock.uptimeMillis();
+            if (now - lastCompositorGlassFailureLogAt < 3000L) return;
+            lastCompositorGlassFailureLogAt = now;
+            ModuleLog.line(
+                    "(InstaLy | FloatingNav): SurfaceControl video glass unavailable",
+                    t
+            );
         }
 
         private void captureSurfaceVideo(SurfaceView surface) {
@@ -1752,11 +2895,48 @@ public final class FloatingIosBottomNavHook {
                 return;
             }
 
-            int sourceWidth = surface.getWidth();
-            int sourceHeight = surface.getHeight();
-            float scale = Math.min(1f, 720f / Math.max(1, sourceWidth));
-            int copyWidth = Math.max(2, Math.round(sourceWidth * scale));
-            int copyHeight = Math.max(2, Math.round(sourceHeight * scale));
+            int[] layerLocation = new int[2];
+            int[] surfaceLocation = new int[2];
+            getLocationInWindow(layerLocation);
+            surface.getLocationInWindow(surfaceLocation);
+
+            Rect layerInWindow = new Rect(
+                    layerLocation[0],
+                    layerLocation[1],
+                    layerLocation[0] + getWidth(),
+                    layerLocation[1] + getHeight()
+            );
+            Rect surfaceInWindow = new Rect(
+                    surfaceLocation[0],
+                    surfaceLocation[1],
+                    surfaceLocation[0] + surface.getWidth(),
+                    surfaceLocation[1] + surface.getHeight()
+            );
+            Rect overlapInWindow = new Rect();
+            if (!overlapInWindow.setIntersect(layerInWindow, surfaceInWindow)
+                    || overlapInWindow.width() <= 1
+                    || overlapInWindow.height() <= 1) {
+                clearSurfacePatch();
+                return;
+            }
+
+            Rect sourceRect = new Rect(
+                    overlapInWindow.left - surfaceInWindow.left,
+                    overlapInWindow.top - surfaceInWindow.top,
+                    overlapInWindow.right - surfaceInWindow.left,
+                    overlapInWindow.bottom - surfaceInWindow.top
+            );
+            Rect destinationRect = new Rect(
+                    overlapInWindow.left - layerInWindow.left,
+                    overlapInWindow.top - layerInWindow.top,
+                    overlapInWindow.right - layerInWindow.left,
+                    overlapInWindow.bottom - layerInWindow.top
+            );
+
+            // Keep the compositor sample 1:1 with the glass region where practical. The navbar
+            // is small, so this is both cheaper than copying the entire Reel and more faithful.
+            int copyWidth = Math.max(2, destinationRect.width());
+            int copyHeight = Math.max(2, destinationRect.height());
 
             if (pixelCopyBuffer == null
                     || pixelCopyBuffer.isRecycled()
@@ -1777,12 +2957,31 @@ public final class FloatingIosBottomNavHook {
             pixelCopyInFlight = true;
             lastPixelCopyAt = SystemClock.uptimeMillis();
             Bitmap destination = pixelCopyBuffer;
+            android.view.Surface compositorSurface =
+                    surface.getHolder().getSurface();
 
             try {
                 PixelCopy.request(
-                        surface,
+                        compositorSurface,
+                        sourceRect,
                         destination,
                         result -> {
+                            if (result == PixelCopy.ERROR_SOURCE_NO_DATA
+                                    && !destination.isRecycled()
+                                    && surface.isAttachedToWindow()
+                                    && pixelCopySurface == surface) {
+                                // Instagram Reels can expose a Surface whose buffer transform
+                                // does not match SurfaceView coordinates. Let PixelCopy's
+                                // SurfaceView overload resolve that transform, then crop the
+                                // navbar intersection from the returned frame.
+                                captureSurfaceViewPixelCopyFallback(
+                                        surface,
+                                        sourceRect,
+                                        destinationRect
+                                );
+                                return;
+                            }
+
                             pixelCopyInFlight = false;
                             if (result != PixelCopy.SUCCESS
                                     || destination.isRecycled()
@@ -1793,7 +2992,7 @@ public final class FloatingIosBottomNavHook {
                                     if (now - lastPixelCopyFailureLogAt > 3000L) {
                                         lastPixelCopyFailureLogAt = now;
                                         ModuleLog.line(
-                                                "(InstaLy | FloatingNav): SurfaceView PixelCopy result="
+                                                "(InstaLy | FloatingNav): Surface PixelCopy result="
                                                         + result
                                         );
                                     }
@@ -1801,11 +3000,12 @@ public final class FloatingIosBottomNavHook {
                                 return;
                             }
 
-                            Rect destinationRect = viewRectInLayer(surface);
-                            pixelCopyDestination = destinationRect;
-                            logVideoBackdropMode("SurfaceView/PixelCopy");
-                            backdropView.setSurfacePatch(destination, destinationRect);
-                            selectionLens.setSurfacePatch(destination, destinationRect);
+                            publishSurfaceVideoPatch(
+                                    surface,
+                                    destination,
+                                    destinationRect,
+                                    "Surface/PixelCopy-overlap"
+                            );
                         },
                         mainHandler
                 );
@@ -1822,6 +3022,195 @@ public final class FloatingIosBottomNavHook {
             }
         }
 
+        private void captureSurfaceViewPixelCopyFallback(
+                SurfaceView surface,
+                Rect sourceRectInView,
+                Rect destinationRect
+        ) {
+            int sourceWidth = Math.max(2, surface.getWidth());
+            int sourceHeight = Math.max(2, surface.getHeight());
+
+            // This buffer represents the full SurfaceView in view coordinates. Keep it
+            // reasonably small because we only need enough detail for an 8dp blur/lens.
+            float scale = Math.min(
+                    1f,
+                    720f / Math.max(sourceWidth, sourceHeight)
+            );
+            int fullWidth = Math.max(2, Math.round(sourceWidth * scale));
+            int fullHeight = Math.max(2, Math.round(sourceHeight * scale));
+
+            if (pixelCopyFullSurfaceBuffer == null
+                    || pixelCopyFullSurfaceBuffer.isRecycled()
+                    || pixelCopyFullSurfaceBuffer.getWidth() != fullWidth
+                    || pixelCopyFullSurfaceBuffer.getHeight() != fullHeight) {
+                if (pixelCopyFullSurfaceBuffer != null
+                        && !pixelCopyFullSurfaceBuffer.isRecycled()) {
+                    pixelCopyFullSurfaceBuffer.recycle();
+                }
+                pixelCopyFullSurfaceBuffer = Bitmap.createBitmap(
+                        fullWidth,
+                        fullHeight,
+                        Bitmap.Config.ARGB_8888
+                );
+            }
+
+            Bitmap fullFrame = pixelCopyFullSurfaceBuffer;
+            try {
+                PixelCopy.request(
+                        surface,
+                        fullFrame,
+                        result -> {
+                            pixelCopyInFlight = false;
+
+                            if (result != PixelCopy.SUCCESS
+                                    || fullFrame.isRecycled()
+                                    || !surface.isAttachedToWindow()
+                                    || pixelCopySurface != surface) {
+                                long now = SystemClock.uptimeMillis();
+                                if (now - lastPixelCopyFailureLogAt > 3000L) {
+                                    lastPixelCopyFailureLogAt = now;
+                                    ModuleLog.line(
+                                            "(InstaLy | FloatingNav): SurfaceView PixelCopy fallback result="
+                                                    + result
+                                    );
+                                }
+                                return;
+                            }
+
+                            Rect scaledSource = new Rect(
+                                    Math.max(
+                                            0,
+                                            Math.round(
+                                                    sourceRectInView.left
+                                                            * fullWidth
+                                                            / (float) sourceWidth
+                                            )
+                                    ),
+                                    Math.max(
+                                            0,
+                                            Math.round(
+                                                    sourceRectInView.top
+                                                            * fullHeight
+                                                            / (float) sourceHeight
+                                            )
+                                    ),
+                                    Math.min(
+                                            fullWidth,
+                                            Math.round(
+                                                    sourceRectInView.right
+                                                            * fullWidth
+                                                            / (float) sourceWidth
+                                            )
+                                    ),
+                                    Math.min(
+                                            fullHeight,
+                                            Math.round(
+                                                    sourceRectInView.bottom
+                                                            * fullHeight
+                                                            / (float) sourceHeight
+                                            )
+                                    )
+                            );
+
+                            if (scaledSource.width() <= 1
+                                    || scaledSource.height() <= 1) {
+                                return;
+                            }
+
+                            int patchWidth = Math.max(
+                                    2,
+                                    destinationRect.width()
+                            );
+                            int patchHeight = Math.max(
+                                    2,
+                                    destinationRect.height()
+                            );
+                            if (pixelCopyBuffer == null
+                                    || pixelCopyBuffer.isRecycled()
+                                    || pixelCopyBuffer.getWidth() != patchWidth
+                                    || pixelCopyBuffer.getHeight() != patchHeight) {
+                                if (pixelCopyBuffer != null
+                                        && !pixelCopyBuffer.isRecycled()) {
+                                    pixelCopyBuffer.recycle();
+                                }
+                                pixelCopyBuffer = Bitmap.createBitmap(
+                                        patchWidth,
+                                        patchHeight,
+                                        Bitmap.Config.ARGB_8888
+                                );
+                            }
+
+                            Canvas crop = new Canvas(pixelCopyBuffer);
+                            crop.drawColor(
+                                    Color.TRANSPARENT,
+                                    PorterDuff.Mode.CLEAR
+                            );
+                            crop.drawBitmap(
+                                    fullFrame,
+                                    scaledSource,
+                                    new Rect(
+                                            0,
+                                            0,
+                                            patchWidth,
+                                            patchHeight
+                                    ),
+                                    new Paint(
+                                            Paint.ANTI_ALIAS_FLAG
+                                                    | Paint.FILTER_BITMAP_FLAG
+                                    )
+                            );
+
+                            publishSurfaceVideoPatch(
+                                    surface,
+                                    pixelCopyBuffer,
+                                    destinationRect,
+                                    "SurfaceView/PixelCopy-transform"
+                            );
+                        },
+                        mainHandler
+                );
+            } catch (Throwable t) {
+                pixelCopyInFlight = false;
+                long now = SystemClock.uptimeMillis();
+                if (now - lastPixelCopyFailureLogAt > 3000L) {
+                    lastPixelCopyFailureLogAt = now;
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): SurfaceView PixelCopy fallback failed",
+                            t
+                    );
+                }
+            }
+        }
+
+        private void publishSurfaceVideoPatch(
+                SurfaceView surface,
+                Bitmap frame,
+                Rect destinationRect,
+                String mode
+        ) {
+            if (frame == null
+                    || frame.isRecycled()
+                    || !surface.isAttachedToWindow()
+                    || pixelCopySurface != surface) {
+                return;
+            }
+
+            pixelCopyDestination = new Rect(destinationRect);
+            logVideoBackdropMode(mode);
+            backdropView.setSurfacePatch(
+                    frame,
+                    pixelCopyDestination
+            );
+            selectionLens.setSurfacePatch(
+                    frame,
+                    pixelCopyDestination
+            );
+
+            // Re-record the hidden exported row with the actual video pixels before its
+            // vibrancy -> blur -> lens effect, matching Kyant's backdrop composition.
+            postOnAnimation(this::captureBackdrop);
+        }
+
         private void captureTextureVideo(TextureView texture) {
             long now = SystemClock.uptimeMillis();
             if (now - lastTextureCopyAt < 33L) return;
@@ -1834,11 +3223,33 @@ public final class FloatingIosBottomNavHook {
                 return;
             }
 
-            int sourceWidth = texture.getWidth();
-            int sourceHeight = texture.getHeight();
-            float scale = Math.min(1f, 720f / Math.max(1, sourceWidth));
-            int copyWidth = Math.max(2, Math.round(sourceWidth * scale));
-            int copyHeight = Math.max(2, Math.round(sourceHeight * scale));
+            int[] layerLocation = new int[2];
+            int[] textureLocation = new int[2];
+            getLocationInWindow(layerLocation);
+            texture.getLocationInWindow(textureLocation);
+
+            Rect layerInWindow = new Rect(
+                    layerLocation[0],
+                    layerLocation[1],
+                    layerLocation[0] + getWidth(),
+                    layerLocation[1] + getHeight()
+            );
+            Rect textureInWindow = new Rect(
+                    textureLocation[0],
+                    textureLocation[1],
+                    textureLocation[0] + texture.getWidth(),
+                    textureLocation[1] + texture.getHeight()
+            );
+            Rect overlapInWindow = new Rect();
+            if (!overlapInWindow.setIntersect(layerInWindow, textureInWindow)
+                    || overlapInWindow.width() <= 1
+                    || overlapInWindow.height() <= 1) {
+                clearTexturePatch();
+                return;
+            }
+
+            int copyWidth = Math.max(2, overlapInWindow.width());
+            int copyHeight = Math.max(2, overlapInWindow.height());
 
             if (textureVideoBuffer == null
                     || textureVideoBuffer.isRecycled()
@@ -1857,16 +3268,46 @@ public final class FloatingIosBottomNavHook {
             }
 
             try {
-                Bitmap copied = texture.getBitmap(textureVideoBuffer);
-                if (copied == null) {
+                // TextureView can crop through a Matrix-free temporary full bitmap only if the
+                // requested region is local. Use Canvas drawBitmap with the local source rect.
+                Bitmap full = texture.getBitmap();
+                if (full == null || full.isRecycled()) {
                     clearTexturePatch();
                     return;
                 }
-                textureVideoBuffer = copied;
-                textureVideoDestination = viewRectInLayer(texture);
-                logVideoBackdropMode("TextureView/getBitmap");
-                backdropView.setTexturePatch(copied, textureVideoDestination);
-                selectionLens.setTexturePatch(copied, textureVideoDestination);
+
+                Rect sourceRect = new Rect(
+                        overlapInWindow.left - textureInWindow.left,
+                        overlapInWindow.top - textureInWindow.top,
+                        overlapInWindow.right - textureInWindow.left,
+                        overlapInWindow.bottom - textureInWindow.top
+                );
+                Canvas cropCanvas = new Canvas(textureVideoBuffer);
+                cropCanvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
+                cropCanvas.drawBitmap(
+                        full,
+                        sourceRect,
+                        new Rect(0, 0, copyWidth, copyHeight),
+                        new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG)
+                );
+                full.recycle();
+
+                textureVideoDestination = new Rect(
+                        overlapInWindow.left - layerInWindow.left,
+                        overlapInWindow.top - layerInWindow.top,
+                        overlapInWindow.right - layerInWindow.left,
+                        overlapInWindow.bottom - layerInWindow.top
+                );
+                logVideoBackdropMode("TextureView/getBitmap-overlap");
+                backdropView.setTexturePatch(
+                        textureVideoBuffer,
+                        textureVideoDestination
+                );
+                selectionLens.setTexturePatch(
+                        textureVideoBuffer,
+                        textureVideoDestination
+                );
+                postOnAnimation(this::captureBackdrop);
             } catch (Throwable t) {
                 clearTexturePatch();
             }
@@ -1907,7 +3348,11 @@ public final class FloatingIosBottomNavHook {
             selectionLens.setTexturePatch(null, null);
         }
 
-        private View findTopmostIntersectingVideoView(View root, Rect layerRect) {
+        private void collectIntersectingVideoViews(
+                View root,
+                Rect layerRect,
+                List<View> out
+        ) {
             if (root == null
                     || root == this
                     || root == selectorHost
@@ -1916,7 +3361,7 @@ public final class FloatingIosBottomNavHook {
                     || root == nativeShadow
                     || root.getVisibility() != View.VISIBLE
                     || root.getAlpha() <= 0f) {
-                return null;
+                return;
             }
 
             if (root instanceof SurfaceView || root instanceof TextureView) {
@@ -1928,18 +3373,55 @@ public final class FloatingIosBottomNavHook {
                         location[0] + root.getWidth(),
                         location[1] + root.getHeight()
                 );
-                return Rect.intersects(layerRect, rect) ? root : null;
+                if (Rect.intersects(layerRect, rect)) {
+                    out.add(root);
+                }
             }
 
             if (root instanceof ViewGroup) {
                 ViewGroup group = (ViewGroup) root;
                 for (int i = group.getChildCount() - 1; i >= 0; i--) {
-                    View found =
-                            findTopmostIntersectingVideoView(group.getChildAt(i), layerRect);
-                    if (found != null) return found;
+                    collectIntersectingVideoViews(
+                            group.getChildAt(i),
+                            layerRect,
+                            out
+                    );
                 }
             }
-            return null;
+        }
+
+        private void logVideoCandidates(List<View> candidates) {
+            StringBuilder fingerprint = new StringBuilder();
+            for (int i = 0; i < candidates.size(); i++) {
+                View candidate = candidates.get(i);
+                if (i > 0) fingerprint.append(" | ");
+                fingerprint.append(candidate.getClass().getSimpleName())
+                        .append("@")
+                        .append(Integer.toHexString(System.identityHashCode(candidate)))
+                        .append("(")
+                        .append(candidate.getWidth())
+                        .append("x")
+                        .append(candidate.getHeight())
+                        .append(")");
+                if (candidate instanceof SurfaceView) {
+                    try {
+                        android.view.Surface surface =
+                                ((SurfaceView) candidate).getHolder().getSurface();
+                        fingerprint.append("[surfaceValid=")
+                                .append(surface != null && surface.isValid())
+                                .append("]");
+                    } catch (Throwable ignored) {}
+                }
+            }
+
+            String value = fingerprint.toString();
+            if (!value.equals(lastVideoCandidateFingerprint)) {
+                lastVideoCandidateFingerprint = value;
+                ModuleLog.line(
+                        "(InstaLy | FloatingNav): video candidates="
+                                + (value.isEmpty() ? "none" : value)
+                );
+            }
         }
 
         private void moveLensToTab(View tab, boolean animate) {
@@ -1983,13 +3465,15 @@ public final class FloatingIosBottomNavHook {
             lensLp.topMargin = Math.max(0, (getHeight() - lensHeight) / 2);
             selectionLens.setLayoutParams(lensLp);
             selectionLens.setVisibility(View.VISIBLE);
-            selectionLens.setAlpha(1f);
+            selectionLens.setAlpha(
+                    videoUsesCompositorFallback ? 0f : 1f
+            );
 
-            FrameLayout.LayoutParams surfaceLp =
+            FrameLayout.LayoutParams chromeLp =
                     new FrameLayout.LayoutParams(lensLp);
-            selectionSurface.setLayoutParams(surfaceLp);
-            selectionSurface.setVisibility(View.VISIBLE);
-            selectionSurface.setAlpha(1f);
+            selectorChrome.setLayoutParams(chromeLp);
+            selectorChrome.setVisibility(View.VISIBLE);
+            selectorChrome.setAlpha(1f);
         }
 
         private void applySelectorFromTabValue() {
@@ -2010,12 +3494,16 @@ public final class FloatingIosBottomNavHook {
 
             // Exact LiquidBottomTabs geometry:
             // translationX = value * tabWidth with a 4dp horizontal container padding.
-            float baseX = horizontalPadding + value * tabWidth;
-            float x = baseX + panelOffsetPx;
+            float x = horizontalPadding + value * tabWidth;
             selectionLens.setX(x);
-            selectionSurface.setX(x);
-            selectionLens.setSampleOffsetX(Math.round(baseX));
+            selectorChrome.setX(x);
+            selectionLens.setSampleOffset(
+                    Math.round(x),
+                    Math.round(selectionLens.getY())
+            );
+            updateInteractiveHighlight();
             applyKyantTransform();
+            updateCompositorVideoGlassGeometry();
             updateDragHandleFromLens();
         }
 
@@ -2052,74 +3540,32 @@ public final class FloatingIosBottomNavHook {
             float scaleY = pressScaleY * (1f - yVelocityShape);
             selectionLens.setScaleX(scaleX);
             selectionLens.setScaleY(scaleY);
-            selectionSurface.setScaleX(scaleX);
-            selectionSurface.setScaleY(scaleY);
+            selectionLens.setInverseScale(scaleX, scaleY);
+            selectorChrome.setScaleX(scaleX);
+            selectorChrome.setScaleY(scaleY);
+            updateCompositorVideoGlassGeometry();
         }
 
-        private int selectorSampleOffsetX() {
-            return Math.round(selectionLens.getX() - panelOffsetPx);
-        }
-
-        private void updatePanelTransform() {
+        private void applyOuterPressTransform() {
             float width = Math.max(1f, getWidth());
-            float fraction = Math.max(
-                    -1f,
-                    Math.min(1f, panelOffsetRaw / width)
-            );
-            float eased = PANEL_EASE_OUT.getInterpolation(Math.abs(fraction));
-            panelOffsetPx = dp(getContext(), 4)
-                    * Math.signum(fraction)
-                    * eased;
+            float scale =
+                    1f + (dp(getContext(), 16) / width) * pressProgress;
 
-            setTranslationX(panelOffsetPx);
-            nativeBar.setTranslationX(nativeBarBaseTranslationX + panelOffsetPx);
-
-            float bodyScale = 1f
-                    + (dp(getContext(), 16) / width) * pressProgress;
-            backdropView.setScaleX(bodyScale);
-            backdropView.setScaleY(bodyScale);
-            surfaceTint.setScaleX(bodyScale);
-            surfaceTint.setScaleY(bodyScale);
-            nativeBar.setScaleX(nativeBarBaseScaleX * bodyScale);
-            nativeBar.setScaleY(nativeBarBaseScaleY * bodyScale);
-
-            List<View> tabs = visibleNativeTabs(nativeBar);
-            if (!tabs.isEmpty()
-                    && selectionLens.getVisibility() == View.VISIBLE) {
-                int horizontalPadding = dp(getContext(), 4);
-                float tabWidth = Math.max(
-                        1f,
-                        (getWidth() - horizontalPadding * 2f) / tabs.size()
-                );
-                float value = Math.max(
-                        0f,
-                        Math.min(tabs.size() - 1f, tabValue)
-                );
-                float baseX = horizontalPadding + value * tabWidth;
-                float x = baseX + panelOffsetPx;
-                selectionLens.setX(x);
-                selectionSurface.setX(x);
-                selectionLens.setSampleOffsetX(Math.round(baseX));
-                updateDragHandleFromLens();
-            }
-            invalidate();
+            backdropView.setScaleX(scale);
+            backdropView.setScaleY(scale);
+            backdropView.setInverseScale(scale, scale);
+            surfaceTint.setScaleX(scale);
+            surfaceTint.setScaleY(scale);
+            bodyChrome.setScaleX(scale);
+            bodyChrome.setScaleY(scale);
+            nativeBar.setScaleX(nativeBarBaseScaleX * scale);
+            nativeBar.setScaleY(nativeBarBaseScaleY * scale);
         }
 
-        private void drawInteractiveHighlight(
-                Canvas canvas,
-                float left,
-                float top,
-                float right,
-                float bottom,
-                float progress
-        ) {
-            progress = Math.max(0f, Math.min(1f, progress));
-            if (progress <= 0.001f || right <= left || bottom <= top) return;
-
+        private float selectorCenterX() {
             List<View> tabs = visibleNativeTabs(nativeBar);
-            if (tabs.isEmpty()) return;
-
-            float horizontalPadding = dp(getContext(), 4);
+            if (tabs.isEmpty()) return getWidth() / 2f;
+            int horizontalPadding = dp(getContext(), 4);
             float tabWidth = Math.max(
                     1f,
                     (getWidth() - horizontalPadding * 2f) / tabs.size()
@@ -2128,65 +3574,15 @@ public final class FloatingIosBottomNavHook {
                     0f,
                     Math.min(tabs.size() - 1f, tabValue)
             );
-            float centerX = horizontalPadding + (value + 0.5f) * tabWidth;
-            float centerY = (top + bottom) / 2f;
-            float radius = Math.max(1f, (bottom - top) * 1.5f);
+            return horizontalPadding + (value + 0.5f) * tabWidth;
+        }
 
-            interactiveHighlightRect.set(left, top, right, bottom);
-            interactiveHighlightClip.reset();
-            interactiveHighlightClip.addRoundRect(
-                    interactiveHighlightRect,
-                    (bottom - top) / 2f,
-                    (bottom - top) / 2f,
-                    Path.Direction.CW
-            );
-
-            int save = canvas.save();
-            canvas.clipPath(interactiveHighlightClip);
-
-            interactiveHighlightPaint.setShader(null);
-            interactiveHighlightPaint.setXfermode(
-                    new PorterDuffXfermode(PorterDuff.Mode.ADD)
-            );
-            interactiveHighlightPaint.setColor(
-                    Color.argb(
-                            Math.round(255f * 0.08f * progress),
-                            255, 255, 255
-                    )
-            );
-            canvas.drawRect(interactiveHighlightRect, interactiveHighlightPaint);
-
-            if (Build.VERSION.SDK_INT >= 33) {
-                Api33InteractiveHighlight.configure(
-                        interactiveHighlightPaint,
-                        right - left,
-                        bottom - top,
-                        radius,
-                        centerX,
-                        centerY,
-                        progress
-                );
-            } else {
-                interactiveHighlightPaint.setShader(
-                        new RadialGradient(
-                                centerX,
-                                centerY,
-                                radius,
-                                Color.argb(
-                                        Math.round(255f * 0.15f * progress),
-                                        255, 255, 255
-                                ),
-                                Color.TRANSPARENT,
-                                Shader.TileMode.CLAMP
-                        )
-                );
-                interactiveHighlightPaint.setColor(Color.WHITE);
-            }
-            canvas.drawRect(interactiveHighlightRect, interactiveHighlightPaint);
-
-            interactiveHighlightPaint.setShader(null);
-            interactiveHighlightPaint.setXfermode(null);
-            canvas.restoreToCount(save);
+        private void updateInteractiveHighlight() {
+            // The Compose demo can use BlendMode.Plus inside its own offscreen graphics layer.
+            // Native PorterDuff.ADD here visibly blooms outside the intended material, so do not
+            // fake that row-level wash. The moving selector still uses Kyant's lens, thin edge
+            // highlight, press surface and inner shadow.
+            bodyChrome.setInteractiveHighlight(0f, selectorCenterX());
         }
 
         private void updateDragHandleFromLens() {
@@ -2232,12 +3628,7 @@ public final class FloatingIosBottomNavHook {
                     releaseScaleWhenSettled = false;
                     dragLastRawX = event.getRawX();
                     dragTargetValue = tabValue;
-                    panelOffsetSpring.cancel();
-                    panelOffsetValue.setValue(0f);
-                    panelOffsetRaw = 0f;
-                    updatePanelTransform();
                     pressKyant();
-                    highlightProgressSpring.animateToFinalPosition(1f);
                     return true;
                 }
 
@@ -2263,10 +3654,6 @@ public final class FloatingIosBottomNavHook {
                     // Exact DampedDragAnimation idea: the pointer only changes targetValue;
                     // the visible selector follows through the critical spring.
                     tabValueSpring.animateToFinalPosition(dragTargetValue);
-
-                    panelOffsetRaw += dx;
-                    panelOffsetValue.setValue(panelOffsetRaw);
-                    updatePanelTransform();
                     return true;
                 }
 
@@ -2274,8 +3661,6 @@ public final class FloatingIosBottomNavHook {
                 case MotionEvent.ACTION_CANCEL: {
                     if (!draggingLens) return false;
                     draggingLens = false;
-                    highlightProgressSpring.animateToFinalPosition(0f);
-                    panelOffsetSpring.animateToFinalPosition(0f);
 
                     List<View> tabs = visibleNativeTabs(nativeBar);
                     if (tabs.isEmpty()) {
@@ -2337,34 +3722,7 @@ public final class FloatingIosBottomNavHook {
             return best;
         }
 
-        private void updateLensSurface(float progress) {
-            progress = Math.max(0f, Math.min(1f, progress));
 
-            int restRgb = isLightTheme(getContext()) ? 0 : 255;
-            int rgb = Math.round(restRgb * (1f - progress));
-            int alpha = Math.round(26f + (8f - 26f) * progress);
-            int fill = Color.argb(alpha, rgb, rgb, rgb);
-
-            int restStroke = isLightTheme(getContext()) ? 38 : 64;
-            int pressedStroke = isLightTheme(getContext()) ? 64 : 102;
-            int strokeAlpha = Math.round(
-                    restStroke + (pressedStroke - restStroke) * progress
-            );
-            int stroke = Color.argb(
-                    strokeAlpha,
-                    isLightTheme(getContext()) ? 0 : 255,
-                    isLightTheme(getContext()) ? 0 : 255,
-                    isLightTheme(getContext()) ? 0 : 255
-            );
-
-            lensSurfaceDrawable.setColor(fill);
-            lensSurfaceDrawable.setStroke(dp(getContext(), 1), stroke);
-            selectionSurface.setElevation(
-                    dp(getContext(), 6) * progress
-            );
-            selectionSurface.invalidate();
-            selectionLens.invalidate();
-        }
     }
 
     private interface CanvasRecorder {
@@ -2384,6 +3742,9 @@ public final class FloatingIosBottomNavHook {
         private Rect texturePatchDestination;
 
         private int sampleOffsetX;
+        private int sampleOffsetY;
+        private float inverseScaleX = 1f;
+        private float inverseScaleY = 1f;
         private int configuredWidth = -1;
         private int configuredHeight = -1;
         private float interactionProgress;
@@ -2395,15 +3756,21 @@ public final class FloatingIosBottomNavHook {
             setWillNotDraw(false);
         }
 
-        void setSnapshot(Bitmap bitmap, int sampleOffsetX) {
+        void setSnapshot(Bitmap bitmap, int sampleOffsetX, int sampleOffsetY) {
             this.snapshot = bitmap;
             this.sampleOffsetX = sampleOffsetX;
+            this.sampleOffsetY = sampleOffsetY;
             invalidate();
         }
 
-        void setLiveBackdrop(Object renderNode, int sampleOffsetX) {
+        void setLiveBackdrop(
+                Object renderNode,
+                int sampleOffsetX,
+                int sampleOffsetY
+        ) {
             this.liveBackdropNode = renderNode;
             this.sampleOffsetX = sampleOffsetX;
+            this.sampleOffsetY = sampleOffsetY;
             invalidate();
         }
 
@@ -2434,9 +3801,22 @@ public final class FloatingIosBottomNavHook {
             invalidate();
         }
 
-        void setSampleOffsetX(int offsetX) {
-            if (sampleOffsetX == offsetX) return;
+        void setSampleOffset(int offsetX, int offsetY) {
+            if (sampleOffsetX == offsetX && sampleOffsetY == offsetY) return;
             sampleOffsetX = offsetX;
+            sampleOffsetY = offsetY;
+            invalidate();
+        }
+
+        void setInverseScale(float scaleX, float scaleY) {
+            float safeX = Math.max(0.001f, Math.abs(scaleX));
+            float safeY = Math.max(0.001f, Math.abs(scaleY));
+            if (Math.abs(inverseScaleX - safeX) < 0.0005f
+                    && Math.abs(inverseScaleY - safeY) < 0.0005f) {
+                return;
+            }
+            inverseScaleX = safeX;
+            inverseScaleY = safeY;
             invalidate();
         }
 
@@ -2451,7 +3831,17 @@ public final class FloatingIosBottomNavHook {
             super.onDraw(canvas);
 
             int save = canvas.save();
-            canvas.translate(-sampleOffsetX, 0f);
+
+            // Kyant LayerBackdrop applies the inverse layer scale before translating to the
+            // captured backdrop coordinates. This keeps the scene fixed while the glass
+            // capsule stretches.
+            canvas.scale(
+                    1f / inverseScaleX,
+                    1f / inverseScaleY,
+                    0f,
+                    0f
+            );
+            canvas.translate(-sampleOffsetX, -sampleOffsetY);
 
             boolean drewLiveLayer = false;
             if (Build.VERSION.SDK_INT >= 29
@@ -2548,6 +3938,397 @@ public final class FloatingIosBottomNavHook {
                     } catch (Throwable ignored) {}
                 }
             }
+        }
+    }
+
+
+    private static final class KyantChromeView extends View {
+        private final boolean selector;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final RectF rect = new RectF();
+        private final Path clipPath = new Path();
+        private RuntimeShader edgeShader;
+        private RuntimeShader interactiveShader;
+        private Object innerShadowNode;
+
+        private float pressProgress;
+        private float interactiveProgress;
+        private float interactiveCenterX;
+
+        KyantChromeView(Context context, boolean selector) {
+            super(context);
+            this.selector = selector;
+            setWillNotDraw(false);
+            setClickable(false);
+            setFocusable(false);
+        }
+
+        void setPressProgress(float progress) {
+            progress = Math.max(0f, Math.min(1f, progress));
+            if (Math.abs(pressProgress - progress) < 0.002f) return;
+            pressProgress = progress;
+            invalidate();
+        }
+
+        void setInteractiveHighlight(float progress, float centerX) {
+            progress = Math.max(0f, Math.min(1f, progress));
+            if (Math.abs(interactiveProgress - progress) < 0.002f
+                    && Math.abs(interactiveCenterX - centerX) < 0.5f) {
+                return;
+            }
+            interactiveProgress = progress;
+            interactiveCenterX = centerX;
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            if (getWidth() <= 0 || getHeight() <= 0) return;
+
+            rect.set(0f, 0f, getWidth(), getHeight());
+            float radius = getHeight() / 2f;
+
+            if (selector) {
+                drawSelectorSurface(canvas, rect, radius);
+            } else {
+                if (Build.VERSION.SDK_INT >= 33 && interactiveShader == null) {
+                    interactiveShader = new RuntimeShader(
+                            INTERACTIVE_HIGHLIGHT_SHADER
+                    );
+                }
+                drawInteractiveHighlight(
+                        canvas,
+                        rect,
+                        paint,
+                        interactiveShader,
+                        interactiveProgress,
+                        interactiveCenterX
+                );
+            }
+
+            float edgeAlpha = selector ? pressProgress : 1f;
+            if (Build.VERSION.SDK_INT >= 33 && edgeShader == null) {
+                edgeShader = new RuntimeShader(
+                        Api33Effects.DEFAULT_HIGHLIGHT_SHADER
+                );
+            }
+            drawDefaultHighlight(
+                    canvas,
+                    rect,
+                    paint,
+                    edgeShader,
+                    edgeAlpha,
+                    getResources().getDisplayMetrics().density
+            );
+
+            if (selector && pressProgress > 0.001f) {
+                innerShadowNode = drawInnerShadow(
+                        canvas,
+                        innerShadowNode,
+                        rect,
+                        pressProgress,
+                        getResources().getDisplayMetrics().density
+                );
+            }
+        }
+
+        private void drawSelectorSurface(
+                Canvas canvas,
+                RectF rect,
+                float radius
+        ) {
+            float p = pressProgress;
+            boolean light = isLightTheme(getContext());
+
+            int restAlpha = Math.round(255f * 0.10f * (1f - p));
+            paint.setShader(null);
+            paint.setMaskFilter(null);
+            paint.setXfermode(null);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(
+                    light
+                            ? Color.argb(restAlpha, 0, 0, 0)
+                            : Color.argb(restAlpha, 255, 255, 255)
+            );
+            canvas.drawRoundRect(rect, radius, radius, paint);
+
+            paint.setColor(
+                    Color.argb(
+                            Math.round(255f * 0.03f * p),
+                            0, 0, 0
+                    )
+            );
+            canvas.drawRoundRect(rect, radius, radius, paint);
+        }
+
+        private static final String INTERACTIVE_HIGHLIGHT_SHADER = """
+                uniform float2 size;
+                layout(color) uniform half4 color;
+                uniform float radius;
+                uniform float2 position;
+
+                half4 main(float2 coord) {
+                    float dist = distance(coord, position);
+                    float intensity =
+                            smoothstep(radius, radius * 0.5, dist);
+                    return color * intensity;
+                }
+                """;
+
+        static void drawInteractiveHighlight(
+                Canvas canvas,
+                RectF rect,
+                Paint paint,
+                RuntimeShader shader,
+                float progress,
+                float centerX
+        ) {
+            progress = Math.max(0f, Math.min(1f, progress));
+            if (progress <= 0.001f) return;
+
+            float centerY = rect.centerY();
+            float glowRadius = rect.height() * 1.5f;
+            float capsuleRadius = rect.height() / 2f;
+
+            Path capsule = new Path();
+            capsule.addRoundRect(
+                    rect,
+                    capsuleRadius,
+                    capsuleRadius,
+                    Path.Direction.CW
+            );
+            int save = canvas.save();
+            canvas.clipPath(capsule);
+
+            paint.setShader(null);
+            paint.setMaskFilter(null);
+            paint.setStyle(Paint.Style.FILL);
+            paint.setXfermode(
+                    new PorterDuffXfermode(PorterDuff.Mode.ADD)
+            );
+            paint.setColor(
+                    Color.argb(
+                            Math.round(255f * 0.08f * progress),
+                            255, 255, 255
+                    )
+            );
+            canvas.drawRect(rect, paint);
+
+            if (Build.VERSION.SDK_INT >= 33 && shader != null) {
+                shader.setFloatUniform(
+                        "size",
+                        rect.width(),
+                        rect.height()
+                );
+                shader.setColorUniform(
+                        "color",
+                        Color.argb(
+                                Math.round(255f * 0.15f * progress),
+                                255, 255, 255
+                        )
+                );
+                shader.setFloatUniform("radius", glowRadius);
+                shader.setFloatUniform(
+                        "position",
+                        Math.max(rect.left, Math.min(rect.right, centerX)),
+                        centerY
+                );
+                paint.setShader(shader);
+                paint.setColor(Color.WHITE);
+            } else {
+                paint.setShader(
+                        new RadialGradient(
+                                centerX,
+                                centerY,
+                                glowRadius,
+                                Color.argb(
+                                        Math.round(255f * 0.15f * progress),
+                                        255, 255, 255
+                                ),
+                                Color.TRANSPARENT,
+                                Shader.TileMode.CLAMP
+                        )
+                );
+                paint.setColor(Color.WHITE);
+            }
+            canvas.drawRect(rect, paint);
+            canvas.restoreToCount(save);
+
+            paint.setShader(null);
+            paint.setXfermode(null);
+        }
+
+        static void drawDefaultHighlight(
+                Canvas canvas,
+                RectF rect,
+                Paint paint,
+                RuntimeShader shader,
+                float alpha,
+                float density
+        ) {
+            alpha = Math.max(0f, Math.min(1f, alpha));
+            if (alpha <= 0.001f) return;
+
+            float radius = rect.height() / 2f;
+            float strokeWidth =
+                    (float) Math.ceil(0.5f * density) * 2f;
+
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(strokeWidth);
+            paint.setMaskFilter(
+                    new BlurMaskFilter(
+                            Math.max(0.01f, 0.25f * density),
+                            BlurMaskFilter.Blur.NORMAL
+                    )
+            );
+            paint.setXfermode(
+                    new PorterDuffXfermode(PorterDuff.Mode.ADD)
+            );
+            paint.setColor(
+                    Color.argb(
+                            Math.round(255f * 0.50f * alpha),
+                            255, 255, 255
+                    )
+            );
+
+            if (Build.VERSION.SDK_INT >= 33 && shader != null) {
+                shader.setFloatUniform(
+                        "size",
+                        rect.width(),
+                        rect.height()
+                );
+                shader.setFloatUniform(
+                        "cornerRadii",
+                        radius, radius, radius, radius
+                );
+                shader.setColorUniform(
+                        "color",
+                        Color.WHITE
+                );
+                shader.setFloatUniform(
+                        "angle",
+                        (float) (Math.PI / 4.0)
+                );
+                shader.setFloatUniform("falloff", 1f);
+                paint.setShader(shader);
+            } else {
+                paint.setShader(null);
+            }
+
+            clipCapsule(canvas, rect, radius, () ->
+                    canvas.drawRoundRect(rect, radius, radius, paint)
+            );
+
+            paint.setShader(null);
+            paint.setMaskFilter(null);
+            paint.setXfermode(null);
+            paint.setStyle(Paint.Style.FILL);
+        }
+
+        private static Object drawInnerShadow(
+                Canvas canvas,
+                Object existing,
+                RectF rect,
+                float progress,
+                float density
+        ) {
+            if (Build.VERSION.SDK_INT < 31) return existing;
+
+            float blurRadius = 8f * density * progress;
+            if (blurRadius <= 0.001f) return existing;
+
+            int width = Math.max(1, Math.round(rect.width()));
+            int height = Math.max(1, Math.round(rect.height()));
+            float capsuleRadius = rect.height() / 2f;
+
+            RenderNode node = existing instanceof RenderNode
+                    ? (RenderNode) existing
+                    : new RenderNode("InstaLy-KyantInnerShadow");
+            node.setPosition(0, 0, width, height);
+            node.setAlpha(progress);
+            node.setRenderEffect(
+                    RenderEffect.createBlurEffect(
+                            blurRadius,
+                            blurRadius,
+                            Shader.TileMode.DECAL
+                    )
+            );
+
+            Canvas layer = node.beginRecording(width, height);
+            Path clip = new Path();
+            RectF local = new RectF(0f, 0f, width, height);
+            clip.addRoundRect(
+                    local,
+                    capsuleRadius,
+                    capsuleRadius,
+                    Path.Direction.CW
+            );
+            layer.save();
+            layer.clipPath(clip);
+
+            Paint dark = new Paint(Paint.ANTI_ALIAS_FLAG);
+            dark.setColor(Color.argb(
+                    Math.round(255f * 0.15f),
+                    0, 0, 0
+            ));
+            layer.drawRoundRect(
+                    local,
+                    capsuleRadius,
+                    capsuleRadius,
+                    dark
+            );
+
+            Paint clear = new Paint(Paint.ANTI_ALIAS_FLAG);
+            clear.setXfermode(
+                    new PorterDuffXfermode(PorterDuff.Mode.CLEAR)
+            );
+            layer.translate(0f, blurRadius);
+            layer.drawRoundRect(
+                    local,
+                    capsuleRadius,
+                    capsuleRadius,
+                    clear
+            );
+            layer.restore();
+            node.endRecording();
+
+            canvas.save();
+            Path outerClip = new Path();
+            outerClip.addRoundRect(
+                    rect,
+                    capsuleRadius,
+                    capsuleRadius,
+                    Path.Direction.CW
+            );
+            canvas.clipPath(outerClip);
+            canvas.translate(rect.left, rect.top);
+            canvas.drawRenderNode(node);
+            canvas.restore();
+            return node;
+        }
+
+        private interface CanvasBlock {
+            void run();
+        }
+
+        private static void clipCapsule(
+                Canvas canvas,
+                RectF rect,
+                float radius,
+                CanvasBlock block
+        ) {
+            Path path = new Path();
+            path.addRoundRect(
+                    rect,
+                    radius,
+                    radius,
+                    Path.Direction.CW
+            );
+            int save = canvas.save();
+            canvas.clipPath(path);
+            block.run();
+            canvas.restoreToCount(save);
         }
     }
 
@@ -2768,6 +4549,7 @@ public final class FloatingIosBottomNavHook {
                         RenderEffect.createRuntimeShaderEffect(shader, "content");
 
                 if (selectionLens) {
+                    // LiquidBottomTabs selector: combined backdrop + lens only.
                     view.setRenderEffect(lens);
                 } else {
                     ColorMatrix matrix = new ColorMatrix();
@@ -2789,6 +4571,34 @@ public final class FloatingIosBottomNavHook {
                 }
             }
         }
+
+        private static final String DEFAULT_HIGHLIGHT_SHADER = """
+                uniform float2 size;
+                uniform float4 cornerRadii;
+                layout(color) uniform half4 color;
+                uniform float angle;
+                uniform float falloff;
+
+                """ + ROUNDED_RECT_SDF + """
+
+                half4 main(float2 coord) {
+                    float2 halfSize = size * 0.5;
+                    float2 centeredCoord = coord - halfSize;
+                    float radius = radiusAt(coord, cornerRadii);
+
+                    float gradRadius =
+                            min(radius * 1.5, min(halfSize.x, halfSize.y));
+                    float2 grad = gradSdRoundedRect(
+                            centeredCoord,
+                            halfSize,
+                            gradRadius
+                    );
+                    float2 normal = float2(cos(angle), sin(angle));
+                    float d = dot(grad, normal);
+                    float intensity = pow(abs(d), falloff);
+                    return color * intensity;
+                }
+                """;
 
         private static final class HiddenTabsEffectState {
             final RuntimeShader shader;
@@ -2823,7 +4633,7 @@ public final class FloatingIosBottomNavHook {
                 int height,
                 int padding,
                 float density,
-                float interactionProgress
+                float progress
         ) {
             if (!(renderNode instanceof RenderNode)) return existingState;
 
@@ -2832,14 +4642,10 @@ public final class FloatingIosBottomNavHook {
                             ? (HiddenTabsEffectState) existingState
                             : new HiddenTabsEffectState(density);
 
-            float progress = Math.max(0f, Math.min(1f, interactionProgress));
+            progress = Math.max(0f, Math.min(1f, progress));
             float radius = height / 2f;
             state.shader.setFloatUniform("size", (float) width, (float) height);
-            state.shader.setFloatUniform(
-                    "offset",
-                    -padding,
-                    -padding
-            );
+            state.shader.setFloatUniform("offset", -padding, -padding);
             state.shader.setFloatUniform(
                     "cornerRadii",
                     radius, radius, radius, radius
@@ -2880,9 +4686,7 @@ public final class FloatingIosBottomNavHook {
                     ? Math.max(0f, Math.min(1f, interactionProgress))
                     : 1f;
 
-            float radius = selectionLens
-                    ? height / 2f
-                    : Math.min(30f * density, height / 2f);
+            float radius = height / 2f;
 
             float refractionHeight = selectionLens
                     ? Math.max(0.001f, 10f * progress * density)
@@ -2910,50 +4714,4 @@ public final class FloatingIosBottomNavHook {
             return state;
         }
     }
-
-    private static final class Api33InteractiveHighlight {
-        private static RuntimeShader shader;
-
-        static void configure(
-                Paint paint,
-                float width,
-                float height,
-                float radius,
-                float positionX,
-                float positionY,
-                float progress
-        ) {
-            if (shader == null) {
-                shader = new RuntimeShader("""
-                        uniform float2 size;
-                        layout(color) uniform half4 color;
-                        uniform float radius;
-                        uniform float2 position;
-
-                        half4 main(float2 coord) {
-                            float dist = distance(coord, position);
-                            float intensity = smoothstep(
-                                    radius,
-                                    radius * 0.5,
-                                    dist
-                            );
-                            return color * intensity;
-                        }
-                        """);
-            }
-            shader.setFloatUniform("size", width, height);
-            shader.setColorUniform(
-                    "color",
-                    Color.argb(
-                            Math.round(255f * 0.15f * progress),
-                            255, 255, 255
-                    )
-            );
-            shader.setFloatUniform("radius", radius);
-            shader.setFloatUniform("position", positionX, positionY);
-            paint.setShader(shader);
-            paint.setColor(Color.WHITE);
-        }
-    }
-
 }
