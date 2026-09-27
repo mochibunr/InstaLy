@@ -1583,27 +1583,26 @@ public final class FloatingIosBottomNavHook {
         }
 
         private void configureLensGeometry(View tab) {
-            int[] tabLocation = new int[2];
-            int[] layerLocation = new int[2];
-            tab.getLocationInWindow(tabLocation);
-            getLocationInWindow(layerLocation);
+            List<View> tabs = visibleNativeTabs(nativeBar);
+            if (tabs.isEmpty()) return;
 
-            int tabTop = tabLocation[1] - layerLocation[1];
-            int horizontalInset = Math.min(dp(getContext(), 6), tab.getWidth() / 8);
-            int verticalInset = dp(getContext(), 4);
+            int horizontalPadding = dp(getContext(), 4);
+            float tabWidth = Math.max(
+                    1f,
+                    (getWidth() - horizontalPadding * 2f) / tabs.size()
+            );
+
+            int verticalPadding = dp(getContext(), 4);
+            int availableHeight = Math.max(1, getHeight() - verticalPadding * 2);
+            int desiredHeight = dp(getContext(), 56);
+            int lensHeight = Math.min(desiredHeight, availableHeight);
 
             FrameLayout.LayoutParams lensLp =
                     (FrameLayout.LayoutParams) selectionLens.getLayoutParams();
-            lensLp.width = Math.max(
-                    dp(getContext(), 48),
-                    tab.getWidth() - horizontalInset * 2
-            );
-            lensLp.height = Math.max(
-                    dp(getContext(), 42),
-                    tab.getHeight() - verticalInset * 2
-            );
+            lensLp.width = Math.max(1, Math.round(tabWidth));
+            lensLp.height = Math.max(1, lensHeight);
             lensLp.leftMargin = 0;
-            lensLp.topMargin = Math.max(0, tabTop + verticalInset);
+            lensLp.topMargin = Math.max(0, (getHeight() - lensHeight) / 2);
             selectionLens.setLayoutParams(lensLp);
             selectionLens.setVisibility(View.VISIBLE);
             selectionLens.setAlpha(1f);
@@ -1614,40 +1613,33 @@ public final class FloatingIosBottomNavHook {
             if (tabs.isEmpty()) return;
 
             float value = Math.max(0f, Math.min(tabs.size() - 1f, tabValue));
-            int lower = Math.max(0, Math.min(tabs.size() - 1, (int) Math.floor(value)));
-            int upper = Math.max(0, Math.min(tabs.size() - 1, lower + 1));
-            float fraction = value - lower;
-
-            View nearest = tabs.get(Math.round(value));
+            View nearest = tabs.get(
+                    Math.max(0, Math.min(tabs.size() - 1, Math.round(value)))
+            );
             configureLensGeometry(nearest);
 
-            float lowerX = lensLeftForTab(tabs.get(lower));
-            float upperX = lensLeftForTab(tabs.get(upper));
-            float x = lowerX + (upperX - lowerX) * fraction;
+            int horizontalPadding = dp(getContext(), 4);
+            float tabWidth = Math.max(
+                    1f,
+                    (getWidth() - horizontalPadding * 2f) / tabs.size()
+            );
 
+            // Exact LiquidBottomTabs geometry:
+            // translationX = value * tabWidth with a 4dp horizontal container padding.
+            float x = horizontalPadding + value * tabWidth;
             selectionLens.setX(x);
             selectionLens.setSampleOffsetX(Math.round(x));
             applyKyantTransform();
             updateDragHandleFromLens();
         }
 
-        private float lensLeftForTab(View tab) {
-            int[] tabLocation = new int[2];
-            int[] layerLocation = new int[2];
-            tab.getLocationInWindow(tabLocation);
-            getLocationInWindow(layerLocation);
-            int horizontalInset = Math.min(dp(getContext(), 6), tab.getWidth() / 8);
-            return tabLocation[0] - layerLocation[0] + horizontalInset;
-        }
-
         private float approximateTabWidth(List<View> tabs) {
-            if (tabs.size() >= 2) {
-                float first = lensLeftForTab(tabs.get(0));
-                float second = lensLeftForTab(tabs.get(1));
-                float distance = Math.abs(second - first);
-                if (distance > 1f) return distance;
-            }
-            return getWidth() / (float) Math.max(1, tabs.size());
+            int horizontalPadding = dp(getContext(), 4);
+            return Math.max(
+                    1f,
+                    (getWidth() - horizontalPadding * 2f)
+                            / Math.max(1, tabs.size())
+            );
         }
 
         private void pressKyant() {
