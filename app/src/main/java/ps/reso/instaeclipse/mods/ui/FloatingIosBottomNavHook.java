@@ -10,6 +10,8 @@ import android.graphics.Color;
 import android.graphics.ColorMatrix;
 import android.graphics.ColorMatrixColorFilter;
 import android.graphics.Paint;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffColorFilter;
 import android.graphics.Rect;
 import android.graphics.RenderEffect;
 import android.graphics.RenderNode;
@@ -294,6 +296,14 @@ public final class FloatingIosBottomNavHook {
         layerLp.width = ViewGroup.LayoutParams.MATCH_PARENT;
         layerLp.height = bar.getHeight();
         host.addView(layer, barIndex, layerLp);
+
+        FrameLayout selectorHost = layer.getSelectorHost();
+        FrameLayout.LayoutParams selectorHostLp = new FrameLayout.LayoutParams(layerLp);
+        selectorHost.setElevation(
+                Math.max(bar.getElevation(), dp(activity, 4)) + dp(activity, 2)
+        );
+        host.addView(selectorHost, selectorHostLp);
+        selectorHost.bringToFront();
 
         View dragHandle = new View(activity);
         dragHandle.setBackgroundColor(Color.TRANSPARENT);
@@ -654,6 +664,7 @@ public final class FloatingIosBottomNavHook {
             if (!bar.isAttachedToWindow()
                     || bar.getParent() != host
                     || layer.getParent() != host
+                    || !layer.isSelectorOverlayAttached()
                     || dragHandle.getParent() != host) {
                 return false;
             }
@@ -727,6 +738,12 @@ public final class FloatingIosBottomNavHook {
             for (MarginSnapshot snapshot : reservedContent) {
                 repaired |= snapshot.ensureZeroBottomMargin();
             }
+
+            layer.syncSelectorOverlayLayout(
+                    sideMargin,
+                    bottomMargin,
+                    Math.max(1, bar.getHeight())
+            );
 
             if (layer.getLayoutParams() instanceof FrameLayout.LayoutParams) {
                 FrameLayout.LayoutParams lp =
@@ -808,6 +825,7 @@ public final class FloatingIosBottomNavHook {
 
         private final BackdropView backdropView;
         private final View surfaceTint;
+        private final FrameLayout selectorHost;
         private final BackdropView selectionLens;
         private final GradientDrawable lensSurfaceDrawable;
 
@@ -849,8 +867,10 @@ public final class FloatingIosBottomNavHook {
 
         // Native-View analogue of Kyant's LayerBackdrop GraphicsLayer.
         private Object liveBackdropNode;
+        private Object tabsBackdropNode;
         private boolean liveBackdropAvailable;
         private boolean loggedLiveBackdrop;
+        private boolean loggedCombinedBackdrop;
         private long lastLiveLayerFailureLogAt;
 
         private boolean pixelCopyInFlight;
@@ -907,6 +927,13 @@ public final class FloatingIosBottomNavHook {
                     ViewGroup.LayoutParams.MATCH_PARENT
             ));
 
+            selectorHost = new FrameLayout(context);
+            selectorHost.setClipChildren(false);
+            selectorHost.setClipToPadding(false);
+            selectorHost.setClickable(false);
+            selectorHost.setFocusable(false);
+            selectorHost.setImportantForAccessibility(View.IMPORTANT_FOR_ACCESSIBILITY_NO);
+
             selectionLens = new BackdropView(context, true);
             selectionLens.setVisibility(View.INVISIBLE);
             selectionLens.setAlpha(0f);
@@ -933,7 +960,7 @@ public final class FloatingIosBottomNavHook {
                     isLightTheme(context) ? 0x26000000 : 0x40FFFFFF
             );
             selectionLens.setForeground(lensSurfaceDrawable);
-            addView(selectionLens, new FrameLayout.LayoutParams(1, 1));
+            selectorHost.addView(selectionLens, new FrameLayout.LayoutParams(1, 1));
 
             GradientDrawable border = new GradientDrawable();
             border.setColor(Color.TRANSPARENT);
@@ -1023,6 +1050,9 @@ public final class FloatingIosBottomNavHook {
                 if (getVisibility() != wantedVisibility) {
                     setVisibility(wantedVisibility);
                 }
+                if (selectorHost.getVisibility() != wantedVisibility) {
+                    selectorHost.setVisibility(wantedVisibility);
+                }
                 if (dragHandle != null && dragHandle.getVisibility() != wantedVisibility) {
                     dragHandle.setVisibility(wantedVisibility);
                 }
@@ -1046,6 +1076,37 @@ public final class FloatingIosBottomNavHook {
 
         void setPresentationEnforcer(Runnable enforcer) {
             this.presentationEnforcer = enforcer;
+        }
+
+        FrameLayout getSelectorHost() {
+            return selectorHost;
+        }
+
+        boolean isSelectorOverlayAttached() {
+            return selectorHost.getParent() == captureRoot;
+        }
+
+        void syncSelectorOverlayLayout(int sideMargin, int bottomMargin, int height) {
+            if (!(selectorHost.getLayoutParams() instanceof FrameLayout.LayoutParams)) return;
+            FrameLayout.LayoutParams lp =
+                    (FrameLayout.LayoutParams) selectorHost.getLayoutParams();
+            int desiredHeight = Math.max(1, height);
+            if (lp.width == ViewGroup.LayoutParams.MATCH_PARENT
+                    && lp.height == desiredHeight
+                    && lp.gravity == Gravity.BOTTOM
+                    && lp.leftMargin == sideMargin
+                    && lp.rightMargin == sideMargin
+                    && lp.bottomMargin == bottomMargin) {
+                return;
+            }
+            FrameLayout.LayoutParams fixed = new FrameLayout.LayoutParams(lp);
+            fixed.width = ViewGroup.LayoutParams.MATCH_PARENT;
+            fixed.height = desiredHeight;
+            fixed.gravity = Gravity.BOTTOM;
+            fixed.leftMargin = sideMargin;
+            fixed.rightMargin = sideMargin;
+            fixed.bottomMargin = bottomMargin;
+            selectorHost.setLayoutParams(fixed);
         }
 
         void attachDragHandle(View handle) {
@@ -1106,6 +1167,9 @@ public final class FloatingIosBottomNavHook {
 
         void dispose() {
             detachListener();
+            if (selectorHost.getParent() instanceof ViewGroup) {
+                ((ViewGroup) selectorHost.getParent()).removeView(selectorHost);
+            }
             tabValueSpring.cancel();
             velocitySpring.cancel();
             pressProgressSpring.cancel();
@@ -1122,8 +1186,11 @@ public final class FloatingIosBottomNavHook {
             pixelCopySurface = null;
             textureVideo = null;
             liveBackdropNode = null;
+            tabsBackdropNode = null;
             backdropView.setLiveBackdrop(null, 0);
+            backdropView.setSecondaryLiveBackdrop(null);
             selectionLens.setLiveBackdrop(null, 0);
+            selectionLens.setSecondaryLiveBackdrop(null);
             backdropView.setSurfacePatch(null, null);
             selectionLens.setSurfacePatch(null, null);
             backdropView.setTexturePatch(null, null);
@@ -1237,6 +1304,13 @@ public final class FloatingIosBottomNavHook {
                         this::drawBackdropSource
                 );
 
+                tabsBackdropNode = Api29LiveBackdrop.record(
+                        tabsBackdropNode,
+                        width,
+                        height,
+                        this::drawAccentTabsBackdrop
+                );
+
                 liveBackdropAvailable = true;
                 if (!loggedLiveBackdrop) {
                     loggedLiveBackdrop = true;
@@ -1244,20 +1318,33 @@ public final class FloatingIosBottomNavHook {
                             "(InstaLy | FloatingNav): backdrop source=live RenderNode"
                     );
                 }
+                if (!loggedCombinedBackdrop) {
+                    loggedCombinedBackdrop = true;
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): selector backdrop=page+accentTabs (Crema architecture)"
+                    );
+                }
+
                 backdropView.setLiveBackdrop(liveBackdropNode, 0);
+                backdropView.setSecondaryLiveBackdrop(null);
+
                 selectionLens.setLiveBackdrop(
                         liveBackdropNode,
                         Math.round(selectionLens.getX())
                 );
+                selectionLens.setSecondaryLiveBackdrop(tabsBackdropNode);
                 return true;
             } catch (Throwable t) {
                 liveBackdropAvailable = false;
                 liveBackdropNode = null;
+                tabsBackdropNode = null;
                 backdropView.setLiveBackdrop(null, 0);
+                backdropView.setSecondaryLiveBackdrop(null);
                 selectionLens.setLiveBackdrop(
                         null,
                         Math.round(selectionLens.getX())
                 );
+                selectionLens.setSecondaryLiveBackdrop(null);
                 long now = SystemClock.uptimeMillis();
                 if (now - lastLiveLayerFailureLogAt > 3000L) {
                     lastLiveLayerFailureLogAt = now;
@@ -1267,6 +1354,54 @@ public final class FloatingIosBottomNavHook {
                     );
                 }
                 return false;
+            }
+        }
+
+        private void drawAccentTabsBackdrop(Canvas canvas) {
+            // Crema captures an invisible, accent-treated copy of the complete tab row into a
+            // second Backdrop. The moving selector samples that together with the page backdrop.
+            int[] layerLocation = new int[2];
+            int[] childLocation = new int[2];
+            getLocationInWindow(layerLocation);
+
+            int accentColor = isLightTheme(getContext())
+                    ? Color.rgb(0, 122, 255)
+                    : Color.rgb(10, 132, 255);
+
+            Paint tintPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+            tintPaint.setColorFilter(
+                    new PorterDuffColorFilter(accentColor, PorterDuff.Mode.SRC_IN)
+            );
+
+            float tabScale = 1f + 0.20f * pressProgress;
+
+            List<View> tabs = visibleNativeTabs(nativeBar);
+            for (View tab : tabs) {
+                if (tab.getVisibility() != View.VISIBLE || tab.getAlpha() <= 0f) continue;
+
+                tab.getLocationInWindow(childLocation);
+                int left = childLocation[0] - layerLocation[0];
+                int top = childLocation[1] - layerLocation[1];
+
+                int save = canvas.save();
+                canvas.translate(left, top);
+                canvas.scale(
+                        tabScale,
+                        tabScale,
+                        tab.getWidth() / 2f,
+                        tab.getHeight() / 2f
+                );
+
+                int layerSave = canvas.saveLayer(
+                        0f,
+                        0f,
+                        tab.getWidth(),
+                        tab.getHeight(),
+                        tintPaint
+                );
+                tab.draw(canvas);
+                canvas.restoreToCount(layerSave);
+                canvas.restoreToCount(save);
             }
         }
 
@@ -1326,6 +1461,7 @@ public final class FloatingIosBottomNavHook {
             for (int i = 0; i < captureRoot.getChildCount(); i++) {
                 View child = captureRoot.getChildAt(i);
                 if (child == this
+                        || child == selectorHost
                         || child == nativeBar
                         || child == dragHandle
                         || child == nativeShadow
@@ -1540,6 +1676,7 @@ public final class FloatingIosBottomNavHook {
         private View findTopmostIntersectingVideoView(View root, Rect layerRect) {
             if (root == null
                     || root == this
+                    || root == selectorHost
                     || root == nativeBar
                     || root == dragHandle
                     || root == nativeShadow
@@ -1846,6 +1983,7 @@ public final class FloatingIosBottomNavHook {
 
         private Bitmap snapshot;
         private Object liveBackdropNode;
+        private Object secondaryLiveBackdropNode;
         private Bitmap surfacePatch;
         private Rect surfacePatchDestination;
         private Bitmap texturePatch;
@@ -1872,6 +2010,11 @@ public final class FloatingIosBottomNavHook {
         void setLiveBackdrop(Object renderNode, int sampleOffsetX) {
             this.liveBackdropNode = renderNode;
             this.sampleOffsetX = sampleOffsetX;
+            invalidate();
+        }
+
+        void setSecondaryLiveBackdrop(Object renderNode) {
+            this.secondaryLiveBackdropNode = renderNode;
             invalidate();
         }
 
@@ -1932,6 +2075,9 @@ public final class FloatingIosBottomNavHook {
                 canvas.drawBitmap(snapshot, 0f, 0f, paint);
             }
 
+            // Video patches belong to the PAGE backdrop, so composite them before the
+            // hidden accent-treated tab backdrop. Crema's selector samples page + tabs in that
+            // same order.
             if (surfacePatch != null
                     && !surfacePatch.isRecycled()
                     && surfacePatchDestination != null) {
@@ -1952,6 +2098,14 @@ public final class FloatingIosBottomNavHook {
                         texturePatchDestination,
                         paint
                 );
+            }
+
+            if (Build.VERSION.SDK_INT >= 29
+                    && secondaryLiveBackdropNode != null
+                    && canvas.isHardwareAccelerated()) {
+                try {
+                    Api29LiveBackdrop.draw(canvas, secondaryLiveBackdropNode);
+                } catch (Throwable ignored) {}
             }
 
             canvas.restoreToCount(save);
@@ -2028,118 +2182,150 @@ public final class FloatingIosBottomNavHook {
 
     private static final class Api33Effects {
 
-        // Adapted from AndroidLiquidGlass Backdrop's rounded-rectangle refraction shaders.
-        private static final String REFRACTION_SHADER = """
-                uniform shader content;
-                uniform float2 size;
-                uniform float radius;
-                uniform float refractionHeight;
-                uniform float refractionAmount;
+        // Exact rounded-rect optical mapping used by Kyant0/Backdrop 2.x. Crema depends on
+        // Backdrop 2.0.1 directly; keep the same offset/corner-radii/depth uniforms here.
+        private static final String ROUNDED_RECT_SDF = """
+                float radiusAt(float2 coord, float4 radii) {
+                    if (coord.x >= 0.0) {
+                        if (coord.y <= 0.0) return radii.y;
+                        else return radii.z;
+                    } else {
+                        if (coord.y <= 0.0) return radii.x;
+                        else return radii.w;
+                    }
+                }
 
-                float sdRoundedRect(float2 coord, float2 halfSize, float r) {
-                    float2 cornerCoord = abs(coord) - (halfSize - float2(r));
-                    float outside = length(max(cornerCoord, 0.0)) - r;
+                float sdRoundedRect(float2 coord, float2 halfSize, float radius) {
+                    float2 cornerCoord = abs(coord) - (halfSize - float2(radius));
+                    float outside = length(max(cornerCoord, 0.0)) - radius;
                     float inside = min(max(cornerCoord.x, cornerCoord.y), 0.0);
                     return outside + inside;
                 }
 
-                float2 gradSdRoundedRect(float2 coord, float2 halfSize, float r) {
-                    float2 cornerCoord = abs(coord) - (halfSize - float2(r));
+                float2 gradSdRoundedRect(float2 coord, float2 halfSize, float radius) {
+                    float2 cornerCoord = abs(coord) - (halfSize - float2(radius));
                     if (cornerCoord.x >= 0.0 || cornerCoord.y >= 0.0) {
-                        return sign(coord) * normalize(max(cornerCoord, 0.0001));
+                        return sign(coord) * normalize(max(cornerCoord, 0.0));
+                    } else {
+                        float gradX = step(cornerCoord.y, cornerCoord.x);
+                        return sign(coord) * float2(gradX, 1.0 - gradX);
                     }
-                    float gradX = step(cornerCoord.y, cornerCoord.x);
-                    return sign(coord) * float2(gradX, 1.0 - gradX);
                 }
+                """;
+
+        private static final String REFRACTION_SHADER = """
+                uniform shader content;
+
+                uniform float2 size;
+                uniform float2 offset;
+                uniform float4 cornerRadii;
+                uniform float refractionHeight;
+                uniform float refractionAmount;
+                uniform float depthEffect;
+
+                """ + ROUNDED_RECT_SDF + """
 
                 float circleMap(float x) {
-                    x = clamp(x, 0.0, 1.0);
-                    return 1.0 - sqrt(max(0.0, 1.0 - x * x));
-                }
-
-                float2 safeCoord(float2 p) {
-                    return clamp(p, float2(0.5), size - float2(0.5));
+                    return 1.0 - sqrt(1.0 - x * x);
                 }
 
                 half4 main(float2 coord) {
                     float2 halfSize = size * 0.5;
-                    float2 centered = coord - halfSize;
-                    float sd = sdRoundedRect(centered, halfSize, radius);
+                    float2 centeredCoord = (coord + offset) - halfSize;
+                    float radius = radiusAt(coord, cornerRadii);
+
+                    float sd = sdRoundedRect(centeredCoord, halfSize, radius);
                     if (-sd >= refractionHeight) {
-                        return content.eval(safeCoord(coord));
+                        return content.eval(coord);
                     }
                     sd = min(sd, 0.0);
-                    float d = circleMap(1.0 - (-sd / refractionHeight)) * refractionAmount;
+
+                    float d = circleMap(1.0 - -sd / refractionHeight) * refractionAmount;
                     float gradRadius = min(radius * 1.5, min(halfSize.x, halfSize.y));
-                    float2 grad = normalize(gradSdRoundedRect(centered, halfSize, gradRadius));
-                    return content.eval(safeCoord(coord + d * grad));
+                    float2 grad = normalize(
+                            gradSdRoundedRect(centeredCoord, halfSize, gradRadius)
+                            + depthEffect * normalize(centeredCoord)
+                    );
+
+                    float2 refractedCoord = coord + d * grad;
+                    return content.eval(refractedCoord);
                 }
                 """;
 
         private static final String DISPERSION_SHADER = """
                 uniform shader content;
+
                 uniform float2 size;
-                uniform float radius;
+                uniform float2 offset;
+                uniform float4 cornerRadii;
                 uniform float refractionHeight;
                 uniform float refractionAmount;
+                uniform float depthEffect;
                 uniform float chromaticAberration;
 
-                float sdRoundedRect(float2 coord, float2 halfSize, float r) {
-                    float2 cornerCoord = abs(coord) - (halfSize - float2(r));
-                    float outside = length(max(cornerCoord, 0.0)) - r;
-                    float inside = min(max(cornerCoord.x, cornerCoord.y), 0.0);
-                    return outside + inside;
-                }
-
-                float2 gradSdRoundedRect(float2 coord, float2 halfSize, float r) {
-                    float2 cornerCoord = abs(coord) - (halfSize - float2(r));
-                    if (cornerCoord.x >= 0.0 || cornerCoord.y >= 0.0) {
-                        return sign(coord) * normalize(max(cornerCoord, 0.0001));
-                    }
-                    float gradX = step(cornerCoord.y, cornerCoord.x);
-                    return sign(coord) * float2(gradX, 1.0 - gradX);
-                }
+                """ + ROUNDED_RECT_SDF + """
 
                 float circleMap(float x) {
-                    x = clamp(x, 0.0, 1.0);
-                    return 1.0 - sqrt(max(0.0, 1.0 - x * x));
-                }
-
-                float2 safeCoord(float2 p) {
-                    return clamp(p, float2(0.5), size - float2(0.5));
+                    return 1.0 - sqrt(1.0 - x * x);
                 }
 
                 half4 main(float2 coord) {
                     float2 halfSize = size * 0.5;
-                    float2 centered = coord - halfSize;
-                    float sd = sdRoundedRect(centered, halfSize, radius);
+                    float2 centeredCoord = (coord + offset) - halfSize;
+                    float radius = radiusAt(coord, cornerRadii);
+
+                    float sd = sdRoundedRect(centeredCoord, halfSize, radius);
                     if (-sd >= refractionHeight) {
-                        return content.eval(safeCoord(coord));
+                        return content.eval(coord);
                     }
                     sd = min(sd, 0.0);
-                    float d = circleMap(1.0 - (-sd / refractionHeight)) * refractionAmount;
+
+                    float d = circleMap(1.0 - -sd / refractionHeight) * refractionAmount;
                     float gradRadius = min(radius * 1.5, min(halfSize.x, halfSize.y));
-                    float2 grad = normalize(gradSdRoundedRect(centered, halfSize, gradRadius));
-                    float2 refracted = coord + d * grad;
-                    float intensity = chromaticAberration
-                            * ((centered.x * centered.y) / max(1.0, halfSize.x * halfSize.y));
-                    float2 dispersed = d * grad * intensity;
+                    float2 grad = normalize(
+                            gradSdRoundedRect(centeredCoord, halfSize, gradRadius)
+                            + depthEffect * normalize(centeredCoord)
+                    );
+
+                    float2 refractedCoord = coord + d * grad;
+                    float dispersionIntensity = chromaticAberration
+                            * ((centeredCoord.x * centeredCoord.y) / (halfSize.x * halfSize.y));
+                    float2 dispersedCoord = d * grad * dispersionIntensity;
 
                     half4 color = half4(0.0);
-                    half4 red = content.eval(safeCoord(refracted + dispersed));
-                    color.r += red.r / 3.5; color.a += red.a / 7.0;
-                    half4 orange = content.eval(safeCoord(refracted + dispersed * 0.6667));
-                    color.r += orange.r / 3.5; color.g += orange.g / 7.0; color.a += orange.a / 7.0;
-                    half4 yellow = content.eval(safeCoord(refracted + dispersed * 0.3333));
-                    color.r += yellow.r / 3.5; color.g += yellow.g / 3.5; color.a += yellow.a / 7.0;
-                    half4 green = content.eval(safeCoord(refracted));
-                    color.g += green.g / 3.5; color.a += green.a / 7.0;
-                    half4 cyan = content.eval(safeCoord(refracted - dispersed * 0.3333));
-                    color.g += cyan.g / 3.5; color.b += cyan.b / 3.0; color.a += cyan.a / 7.0;
-                    half4 blue = content.eval(safeCoord(refracted - dispersed * 0.6667));
-                    color.b += blue.b / 3.0; color.a += blue.a / 7.0;
-                    half4 purple = content.eval(safeCoord(refracted - dispersed));
-                    color.r += purple.r / 7.0; color.b += purple.b / 3.0; color.a += purple.a / 7.0;
+
+                    half4 red = content.eval(refractedCoord + dispersedCoord);
+                    color.r += red.r / 3.5;
+                    color.a += red.a / 7.0;
+
+                    half4 orange = content.eval(refractedCoord + dispersedCoord * (2.0 / 3.0));
+                    color.r += orange.r / 3.5;
+                    color.g += orange.g / 7.0;
+                    color.a += orange.a / 7.0;
+
+                    half4 yellow = content.eval(refractedCoord + dispersedCoord * (1.0 / 3.0));
+                    color.r += yellow.r / 3.5;
+                    color.g += yellow.g / 3.5;
+                    color.a += yellow.a / 7.0;
+
+                    half4 green = content.eval(refractedCoord);
+                    color.g += green.g / 3.5;
+                    color.a += green.a / 7.0;
+
+                    half4 cyan = content.eval(refractedCoord - dispersedCoord * (1.0 / 3.0));
+                    color.g += cyan.g / 3.5;
+                    color.b += cyan.b / 3.0;
+                    color.a += cyan.a / 7.0;
+
+                    half4 blue = content.eval(refractedCoord - dispersedCoord * (2.0 / 3.0));
+                    color.b += blue.b / 3.0;
+                    color.a += blue.a / 7.0;
+
+                    half4 purple = content.eval(refractedCoord - dispersedCoord);
+                    color.r += purple.r / 7.0;
+                    color.b += purple.b / 3.0;
+                    color.a += purple.a / 7.0;
+
                     return color;
                 }
                 """;
@@ -2169,6 +2355,8 @@ public final class FloatingIosBottomNavHook {
                 );
                 RenderEffect lens =
                         RenderEffect.createRuntimeShaderEffect(shader, "content");
+
+                // Crema/Backdrop order: vibrancy -> blur -> lens.
                 view.setRenderEffect(
                         RenderEffect.createChainEffect(lens, blur)
                 );
@@ -2199,9 +2387,6 @@ public final class FloatingIosBottomNavHook {
                     ? height / 2f
                     : Math.min(30f * density, height / 2f);
 
-            // Keep one shader/effect alive and update only uniforms. At rest the selector
-            // receives effectively zero lens displacement; during press it ramps exactly like
-            // LiquidBottomTabs' 10dp/14dp * pressProgress.
             float refractionHeight = selectionLens
                     ? Math.max(0.001f, 10f * progress * density)
                     : 24f * density;
@@ -2210,9 +2395,14 @@ public final class FloatingIosBottomNavHook {
                     : -(24f * density);
 
             state.shader.setFloatUniform("size", (float) width, (float) height);
-            state.shader.setFloatUniform("radius", radius);
+            state.shader.setFloatUniform("offset", 0f, 0f);
+            state.shader.setFloatUniform(
+                    "cornerRadii",
+                    radius, radius, radius, radius
+            );
             state.shader.setFloatUniform("refractionHeight", refractionHeight);
             state.shader.setFloatUniform("refractionAmount", refractionAmount);
+            state.shader.setFloatUniform("depthEffect", 0f);
             if (selectionLens) {
                 state.shader.setFloatUniform("chromaticAberration", 1f);
             }
