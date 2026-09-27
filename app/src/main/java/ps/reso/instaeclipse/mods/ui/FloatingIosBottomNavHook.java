@@ -2070,14 +2070,9 @@ public final class FloatingIosBottomNavHook {
                 canvas.drawBitmap(snapshot, 0f, 0f, paint);
             }
 
-            if (Build.VERSION.SDK_INT >= 29
-                    && secondaryLiveBackdropNode != null
-                    && canvas.isHardwareAccelerated()) {
-                try {
-                    Api29LiveBackdrop.draw(canvas, secondaryLiveBackdropNode);
-                } catch (Throwable ignored) {}
-            }
-
+            // Video patches belong to the PAGE backdrop, so composite them before the
+            // hidden accent-treated tab backdrop. Crema's selector samples page + tabs in that
+            // same order.
             if (surfacePatch != null
                     && !surfacePatch.isRecycled()
                     && surfacePatchDestination != null) {
@@ -2098,6 +2093,14 @@ public final class FloatingIosBottomNavHook {
                         texturePatchDestination,
                         paint
                 );
+            }
+
+            if (Build.VERSION.SDK_INT >= 29
+                    && secondaryLiveBackdropNode != null
+                    && canvas.isHardwareAccelerated()) {
+                try {
+                    Api29LiveBackdrop.draw(canvas, secondaryLiveBackdropNode);
+                } catch (Throwable ignored) {}
             }
 
             canvas.restoreToCount(save);
