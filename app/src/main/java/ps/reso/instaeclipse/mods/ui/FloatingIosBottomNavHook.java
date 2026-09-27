@@ -1461,6 +1461,7 @@ public final class FloatingIosBottomNavHook {
             for (int i = 0; i < captureRoot.getChildCount(); i++) {
                 View child = captureRoot.getChildAt(i);
                 if (child == this
+                        || child == selectorHost
                         || child == nativeBar
                         || child == dragHandle
                         || child == nativeShadow
@@ -1675,6 +1676,7 @@ public final class FloatingIosBottomNavHook {
         private View findTopmostIntersectingVideoView(View root, Rect layerRect) {
             if (root == null
                     || root == this
+                    || root == selectorHost
                     || root == nativeBar
                     || root == dragHandle
                     || root == nativeShadow
