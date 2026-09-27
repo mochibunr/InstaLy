@@ -304,11 +304,17 @@ public final class FloatingIosBottomNavHook {
 
         FrameLayout selectorHost = layer.getSelectorHost();
         FrameLayout.LayoutParams selectorHostLp = new FrameLayout.LayoutParams(layerLp);
-        selectorHost.setElevation(
-                Math.max(bar.getElevation(), dp(activity, 4)) + dp(activity, 2)
+
+        // Keep the moving optical selector behind Instagram's real tab content. Kyant can draw
+        // its selector above the visible Compose Row because tabsBackdrop is a pixel-perfect
+        // duplicate of that Row. Instagram can mutate icon/layout internals at runtime, so the
+        // native row is the authoritative foreground and the selector stays an optical layer.
+        int nativeBarIndex = host.indexOfChild(bar);
+        host.addView(
+                selectorHost,
+                Math.max(0, nativeBarIndex),
+                selectorHostLp
         );
-        host.addView(selectorHost, selectorHostLp);
-        selectorHost.bringToFront();
 
         View dragHandle = new View(activity);
         dragHandle.setBackgroundColor(Color.TRANSPARENT);
@@ -750,6 +756,33 @@ public final class FloatingIosBottomNavHook {
                     Math.max(1, bar.getHeight())
             );
 
+            // Optical layers must remain behind the actual Instagram tab row.
+            int barIndexNow = host.indexOfChild(bar);
+            int layerIndexNow = host.indexOfChild(layer);
+            int selectorIndexNow = host.indexOfChild(layer.getSelectorHost());
+            if (barIndexNow >= 0
+                    && (layerIndexNow < 0
+                    || selectorIndexNow < 0
+                    || layerIndexNow >= barIndexNow
+                    || selectorIndexNow >= barIndexNow)) {
+                if (layerIndexNow >= 0) {
+                    host.removeView(layer);
+                }
+                if (selectorIndexNow >= 0) {
+                    host.removeView(layer.getSelectorHost());
+                }
+
+                int target = Math.max(0, host.indexOfChild(bar));
+                host.addView(layer, target, layer.getLayoutParams());
+                target = Math.max(0, host.indexOfChild(bar));
+                host.addView(
+                        layer.getSelectorHost(),
+                        target,
+                        layer.getSelectorHost().getLayoutParams()
+                );
+                repaired = true;
+            }
+
             if (layer.getLayoutParams() instanceof FrameLayout.LayoutParams) {
                 FrameLayout.LayoutParams lp =
                         (FrameLayout.LayoutParams) layer.getLayoutParams();
@@ -983,9 +1016,8 @@ public final class FloatingIosBottomNavHook {
             );
             selectorHost.addView(selectorChrome, new FrameLayout.LayoutParams(1, 1));
 
-            // Kyant's outer Row uses the default shadow; platform elevation is the closest
-            // native-View equivalent without rasterizing the whole navbar.
-            surfaceTint.setElevation(dp(context, 6));
+            // Do not use platform elevation here. Android's ambient/spot elevation shadow
+            // produces a large halo while Kyant draws a controlled blurred capsule shadow.
 
             // Kyant: velocityAnimation spring(0.5f, 300f).
             velocitySpring = new SpringAnimation(velocityValueHolder);
@@ -1693,7 +1725,12 @@ public final class FloatingIosBottomNavHook {
                     layerLocation[1] + getHeight()
             );
 
-            View video = findTopmostIntersectingVideoView(captureRoot, layerRect);
+            View searchRoot = captureRoot.getRootView();
+            if (searchRoot == null) {
+                searchRoot = captureRoot;
+            }
+
+            View video = findTopmostIntersectingVideoView(searchRoot, layerRect);
             if (video instanceof SurfaceView) {
                 clearTexturePatch();
                 captureSurfaceVideo((SurfaceView) video);
@@ -1703,6 +1740,7 @@ public final class FloatingIosBottomNavHook {
             } else {
                 clearSurfacePatch();
                 clearTexturePatch();
+                logVideoBackdropMode("none/view-tree");
             }
         }
 
@@ -1718,11 +1756,48 @@ public final class FloatingIosBottomNavHook {
                 return;
             }
 
-            int sourceWidth = surface.getWidth();
-            int sourceHeight = surface.getHeight();
-            float scale = Math.min(1f, 720f / Math.max(1, sourceWidth));
-            int copyWidth = Math.max(2, Math.round(sourceWidth * scale));
-            int copyHeight = Math.max(2, Math.round(sourceHeight * scale));
+            int[] layerLocation = new int[2];
+            int[] surfaceLocation = new int[2];
+            getLocationInWindow(layerLocation);
+            surface.getLocationInWindow(surfaceLocation);
+
+            Rect layerInWindow = new Rect(
+                    layerLocation[0],
+                    layerLocation[1],
+                    layerLocation[0] + getWidth(),
+                    layerLocation[1] + getHeight()
+            );
+            Rect surfaceInWindow = new Rect(
+                    surfaceLocation[0],
+                    surfaceLocation[1],
+                    surfaceLocation[0] + surface.getWidth(),
+                    surfaceLocation[1] + surface.getHeight()
+            );
+            Rect overlapInWindow = new Rect();
+            if (!overlapInWindow.setIntersect(layerInWindow, surfaceInWindow)
+                    || overlapInWindow.width() <= 1
+                    || overlapInWindow.height() <= 1) {
+                clearSurfacePatch();
+                return;
+            }
+
+            Rect sourceRect = new Rect(
+                    overlapInWindow.left - surfaceInWindow.left,
+                    overlapInWindow.top - surfaceInWindow.top,
+                    overlapInWindow.right - surfaceInWindow.left,
+                    overlapInWindow.bottom - surfaceInWindow.top
+            );
+            Rect destinationRect = new Rect(
+                    overlapInWindow.left - layerInWindow.left,
+                    overlapInWindow.top - layerInWindow.top,
+                    overlapInWindow.right - layerInWindow.left,
+                    overlapInWindow.bottom - layerInWindow.top
+            );
+
+            // Keep the compositor sample 1:1 with the glass region where practical. The navbar
+            // is small, so this is both cheaper than copying the entire Reel and more faithful.
+            int copyWidth = Math.max(2, destinationRect.width());
+            int copyHeight = Math.max(2, destinationRect.height());
 
             if (pixelCopyBuffer == null
                     || pixelCopyBuffer.isRecycled()
@@ -1743,10 +1818,13 @@ public final class FloatingIosBottomNavHook {
             pixelCopyInFlight = true;
             lastPixelCopyAt = SystemClock.uptimeMillis();
             Bitmap destination = pixelCopyBuffer;
+            android.view.Surface compositorSurface =
+                    surface.getHolder().getSurface();
 
             try {
                 PixelCopy.request(
-                        surface,
+                        compositorSurface,
+                        sourceRect,
                         destination,
                         result -> {
                             pixelCopyInFlight = false;
@@ -1759,7 +1837,7 @@ public final class FloatingIosBottomNavHook {
                                     if (now - lastPixelCopyFailureLogAt > 3000L) {
                                         lastPixelCopyFailureLogAt = now;
                                         ModuleLog.line(
-                                                "(InstaLy | FloatingNav): SurfaceView PixelCopy result="
+                                                "(InstaLy | FloatingNav): Surface PixelCopy result="
                                                         + result
                                         );
                                     }
@@ -1767,11 +1845,21 @@ public final class FloatingIosBottomNavHook {
                                 return;
                             }
 
-                            Rect destinationRect = viewRectInLayer(surface);
-                            pixelCopyDestination = destinationRect;
-                            logVideoBackdropMode("SurfaceView/PixelCopy");
-                            backdropView.setSurfacePatch(destination, destinationRect);
-                            selectionLens.setSurfacePatch(destination, destinationRect);
+                            pixelCopyDestination = new Rect(destinationRect);
+                            logVideoBackdropMode("Surface/PixelCopy-overlap");
+                            backdropView.setSurfacePatch(
+                                    destination,
+                                    pixelCopyDestination
+                            );
+                            selectionLens.setSurfacePatch(
+                                    destination,
+                                    pixelCopyDestination
+                            );
+
+                            // The hidden exported tab row is recorded on the next frame. Force
+                            // that frame so the video pixels pass through its own
+                            // vibrancy -> blur -> lens chain too.
+                            postOnAnimation(this::captureBackdrop);
                         },
                         mainHandler
                 );
@@ -1800,11 +1888,33 @@ public final class FloatingIosBottomNavHook {
                 return;
             }
 
-            int sourceWidth = texture.getWidth();
-            int sourceHeight = texture.getHeight();
-            float scale = Math.min(1f, 720f / Math.max(1, sourceWidth));
-            int copyWidth = Math.max(2, Math.round(sourceWidth * scale));
-            int copyHeight = Math.max(2, Math.round(sourceHeight * scale));
+            int[] layerLocation = new int[2];
+            int[] textureLocation = new int[2];
+            getLocationInWindow(layerLocation);
+            texture.getLocationInWindow(textureLocation);
+
+            Rect layerInWindow = new Rect(
+                    layerLocation[0],
+                    layerLocation[1],
+                    layerLocation[0] + getWidth(),
+                    layerLocation[1] + getHeight()
+            );
+            Rect textureInWindow = new Rect(
+                    textureLocation[0],
+                    textureLocation[1],
+                    textureLocation[0] + texture.getWidth(),
+                    textureLocation[1] + texture.getHeight()
+            );
+            Rect overlapInWindow = new Rect();
+            if (!overlapInWindow.setIntersect(layerInWindow, textureInWindow)
+                    || overlapInWindow.width() <= 1
+                    || overlapInWindow.height() <= 1) {
+                clearTexturePatch();
+                return;
+            }
+
+            int copyWidth = Math.max(2, overlapInWindow.width());
+            int copyHeight = Math.max(2, overlapInWindow.height());
 
             if (textureVideoBuffer == null
                     || textureVideoBuffer.isRecycled()
@@ -1823,16 +1933,46 @@ public final class FloatingIosBottomNavHook {
             }
 
             try {
-                Bitmap copied = texture.getBitmap(textureVideoBuffer);
-                if (copied == null) {
+                // TextureView can crop through a Matrix-free temporary full bitmap only if the
+                // requested region is local. Use Canvas drawBitmap with the local source rect.
+                Bitmap full = texture.getBitmap();
+                if (full == null || full.isRecycled()) {
                     clearTexturePatch();
                     return;
                 }
-                textureVideoBuffer = copied;
-                textureVideoDestination = viewRectInLayer(texture);
-                logVideoBackdropMode("TextureView/getBitmap");
-                backdropView.setTexturePatch(copied, textureVideoDestination);
-                selectionLens.setTexturePatch(copied, textureVideoDestination);
+
+                Rect sourceRect = new Rect(
+                        overlapInWindow.left - textureInWindow.left,
+                        overlapInWindow.top - textureInWindow.top,
+                        overlapInWindow.right - textureInWindow.left,
+                        overlapInWindow.bottom - textureInWindow.top
+                );
+                Canvas cropCanvas = new Canvas(textureVideoBuffer);
+                cropCanvas.drawColor(Color.TRANSPARENT, PorterDuff.Mode.CLEAR);
+                cropCanvas.drawBitmap(
+                        full,
+                        sourceRect,
+                        new Rect(0, 0, copyWidth, copyHeight),
+                        new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG)
+                );
+                full.recycle();
+
+                textureVideoDestination = new Rect(
+                        overlapInWindow.left - layerInWindow.left,
+                        overlapInWindow.top - layerInWindow.top,
+                        overlapInWindow.right - layerInWindow.left,
+                        overlapInWindow.bottom - layerInWindow.top
+                );
+                logVideoBackdropMode("TextureView/getBitmap-overlap");
+                backdropView.setTexturePatch(
+                        textureVideoBuffer,
+                        textureVideoDestination
+                );
+                selectionLens.setTexturePatch(
+                        textureVideoBuffer,
+                        textureVideoDestination
+                );
+                postOnAnimation(this::captureBackdrop);
             } catch (Throwable t) {
                 clearTexturePatch();
             }
@@ -2448,9 +2588,6 @@ public final class FloatingIosBottomNavHook {
             progress = Math.max(0f, Math.min(1f, progress));
             if (Math.abs(pressProgress - progress) < 0.002f) return;
             pressProgress = progress;
-            if (selector) {
-                setElevation(dp(getContext(), 6) * progress);
-            }
             invalidate();
         }
 
@@ -2674,7 +2811,13 @@ public final class FloatingIosBottomNavHook {
                         "cornerRadii",
                         radius, radius, radius, radius
                 );
-                shader.setColorUniform("color", Color.WHITE);
+                shader.setColorUniform(
+                        "color",
+                        Color.argb(
+                                Math.round(255f * 0.50f * alpha),
+                                255, 255, 255
+                        )
+                );
                 shader.setFloatUniform(
                         "angle",
                         (float) (Math.PI / 4.0)
