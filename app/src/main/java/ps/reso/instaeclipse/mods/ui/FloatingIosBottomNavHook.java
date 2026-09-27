@@ -850,6 +850,7 @@ public final class FloatingIosBottomNavHook {
         // Native-View analogue of Kyant's LayerBackdrop GraphicsLayer.
         private RenderNode liveBackdropNode;
         private boolean liveBackdropAvailable;
+        private long lastLiveLayerFailureLogAt;
 
         private boolean pixelCopyInFlight;
         private long lastPixelCopyAt;
@@ -1111,7 +1112,19 @@ public final class FloatingIosBottomNavHook {
                 pixelCopyBuffer.recycle();
                 pixelCopyBuffer = null;
             }
+            if (textureVideoBuffer != null) {
+                textureVideoBuffer.recycle();
+                textureVideoBuffer = null;
+            }
             pixelCopySurface = null;
+            textureVideo = null;
+            liveBackdropNode = null;
+            backdropView.setLiveBackdrop(null, 0);
+            selectionLens.setLiveBackdrop(null, 0);
+            backdropView.setSurfacePatch(null, null);
+            selectionLens.setSurfacePatch(null, null);
+            backdropView.setTexturePatch(null, null);
+            selectionLens.setTexturePatch(null, null);
             if (snapshot != null) {
                 snapshot.recycle();
                 snapshot = null;
@@ -1200,85 +1213,128 @@ public final class FloatingIosBottomNavHook {
             int height = getHeight();
             if (width <= 1 || height <= 1 || !isAttachedToWindow()) return;
 
+            boolean recorded = false;
+            if (Build.VERSION.SDK_INT >= 29) {
+                recorded = recordLiveBackdrop(width, height);
+            }
+
+            if (!recorded) {
+                captureBitmapFallback(width, height);
+            }
+
+            captureIntersectingVideoLayer();
+        }
+
+        private boolean recordLiveBackdrop(int width, int height) {
+            try {
+                if (liveBackdropNode == null) {
+                    liveBackdropNode = new RenderNode("InstaLy-LiveBackdrop");
+                }
+                liveBackdropNode.setPosition(0, 0, width, height);
+
+                Canvas canvas = liveBackdropNode.beginRecording(width, height);
+                drawBackdropSource(canvas);
+                liveBackdropNode.endRecording();
+
+                liveBackdropAvailable = true;
+                backdropView.setLiveBackdrop(liveBackdropNode, 0);
+                selectionLens.setLiveBackdrop(
+                        liveBackdropNode,
+                        Math.round(selectionLens.getX())
+                );
+                return true;
+            } catch (Throwable t) {
+                liveBackdropAvailable = false;
+                long now = SystemClock.uptimeMillis();
+                if (now - lastLiveLayerFailureLogAt > 3000L) {
+                    lastLiveLayerFailureLogAt = now;
+                    ModuleLog.line(
+                            "(InstaLy | FloatingNav): RenderNode live backdrop failed; using bitmap fallback",
+                            t
+                    );
+                }
+                return false;
+            }
+        }
+
+        private void captureBitmapFallback(int width, int height) {
             try {
                 if (snapshot == null
                         || snapshot.getWidth() != width
                         || snapshot.getHeight() != height) {
                     if (snapshot != null) snapshot.recycle();
                     snapshot = Bitmap.createBitmap(
-                            width, height, Bitmap.Config.ARGB_8888
+                            width,
+                            height,
+                            Bitmap.Config.ARGB_8888
                     );
                 } else {
                     snapshot.eraseColor(Color.TRANSPARENT);
                 }
 
                 Canvas canvas = new Canvas(snapshot);
-                int[] layerLocation = new int[2];
-                getLocationInWindow(layerLocation);
+                drawBackdropSource(canvas);
 
-                Drawable rootBackground = captureRoot.getBackground();
-                if (rootBackground != null) {
-                    int[] rootLocation = new int[2];
-                    captureRoot.getLocationInWindow(rootLocation);
-                    int save = canvas.save();
-                    canvas.translate(
-                            rootLocation[0] - layerLocation[0],
-                            rootLocation[1] - layerLocation[1]
-                    );
-                    rootBackground.draw(canvas);
-                    canvas.restoreToCount(save);
-                } else {
-                    canvas.drawColor(
-                            isLightTheme(getContext()) ? Color.WHITE : Color.BLACK
-                    );
-                }
-
-                int[] childLocation = new int[2];
-                for (int i = 0; i < captureRoot.getChildCount(); i++) {
-                    View child = captureRoot.getChildAt(i);
-                    if (child == this
-                            || child == nativeBar
-                            || child == dragHandle
-                            || child == nativeShadow
-                            || child.getVisibility() != View.VISIBLE
-                            || child.getAlpha() <= 0f) {
-                        continue;
-                    }
-
-                    child.getLocationInWindow(childLocation);
-                    int save = canvas.save();
-                    canvas.translate(
-                            childLocation[0] - layerLocation[0],
-                            childLocation[1] - layerLocation[1]
-                    );
-                    child.draw(canvas);
-                    canvas.restoreToCount(save);
-                }
-
-                publishSnapshot();
-
-                // SurfaceView video is composed by SurfaceFlinger and is intentionally absent from
-                // View.draw(Canvas). Patch the live video pixels into the same backdrop bitmap using
-                // PixelCopy. This is the missing piece for feed/reels video refraction.
-                if (SystemClock.uptimeMillis() - lastPixelCopyAt >= 66L) {
-                    captureIntersectingSurfaceVideo();
-                }
+                backdropView.setSnapshot(snapshot, 0);
+                selectionLens.setSnapshot(
+                        snapshot,
+                        Math.round(selectionLens.getX())
+                );
             } catch (Throwable t) {
-                ModuleLog.line("(InstaLy | FloatingNav): backdrop capture failed", t);
+                ModuleLog.line("(InstaLy | FloatingNav): bitmap backdrop fallback failed", t);
             }
         }
 
-        private void publishSnapshot() {
-            backdropView.setSnapshot(snapshot, 0);
-            selectionLens.setSnapshot(
-                    snapshot,
-                    Math.round(selectionLens.getX())
-            );
+        private void drawBackdropSource(Canvas canvas) {
+            int[] layerLocation = new int[2];
+            getLocationInWindow(layerLocation);
+
+            canvas.save();
+            canvas.clipRect(0, 0, getWidth(), getHeight());
+
+            Drawable rootBackground = captureRoot.getBackground();
+            if (rootBackground != null) {
+                int[] rootLocation = new int[2];
+                captureRoot.getLocationInWindow(rootLocation);
+                int save = canvas.save();
+                canvas.translate(
+                        rootLocation[0] - layerLocation[0],
+                        rootLocation[1] - layerLocation[1]
+                );
+                rootBackground.draw(canvas);
+                canvas.restoreToCount(save);
+            } else {
+                canvas.drawColor(
+                        isLightTheme(getContext()) ? Color.WHITE : Color.BLACK
+                );
+            }
+
+            int[] childLocation = new int[2];
+            for (int i = 0; i < captureRoot.getChildCount(); i++) {
+                View child = captureRoot.getChildAt(i);
+                if (child == this
+                        || child == nativeBar
+                        || child == dragHandle
+                        || child == nativeShadow
+                        || child.getVisibility() != View.VISIBLE
+                        || child.getAlpha() <= 0f) {
+                    continue;
+                }
+
+                child.getLocationInWindow(childLocation);
+                int save = canvas.save();
+                canvas.translate(
+                        childLocation[0] - layerLocation[0],
+                        childLocation[1] - layerLocation[1]
+                );
+                child.draw(canvas);
+                canvas.restoreToCount(save);
+            }
+
+            canvas.restore();
         }
 
-        private void captureIntersectingSurfaceVideo() {
-            if (pixelCopyInFlight || snapshot == null || snapshot.isRecycled()) return;
-
+        private void captureIntersectingVideoLayer() {
             int[] layerLocation = new int[2];
             getLocationInWindow(layerLocation);
             Rect layerRect = new Rect(
@@ -1288,22 +1344,33 @@ public final class FloatingIosBottomNavHook {
                     layerLocation[1] + getHeight()
             );
 
-            SurfaceView surface = findTopmostIntersectingSurfaceView(captureRoot, layerRect);
-            if (surface == null
+            View video = findTopmostIntersectingVideoView(captureRoot, layerRect);
+            if (video instanceof SurfaceView) {
+                clearTexturePatch();
+                captureSurfaceVideo((SurfaceView) video);
+            } else if (video instanceof TextureView) {
+                clearSurfacePatch();
+                captureTextureVideo((TextureView) video);
+            } else {
+                clearSurfacePatch();
+                clearTexturePatch();
+            }
+        }
+
+        private void captureSurfaceVideo(SurfaceView surface) {
+            if (pixelCopyInFlight
                     || !surface.isAttachedToWindow()
                     || surface.getWidth() <= 1
                     || surface.getHeight() <= 1
                     || surface.getHolder() == null
                     || surface.getHolder().getSurface() == null
-                    || !surface.getHolder().getSurface().isValid()) {
+                    || !surface.getHolder().getSurface().isValid()
+                    || SystemClock.uptimeMillis() - lastPixelCopyAt < 33L) {
                 return;
             }
 
             int sourceWidth = surface.getWidth();
             int sourceHeight = surface.getHeight();
-
-            // We only need enough source detail for a ~56dp glass strip. Capping the copy width
-            // avoids allocating a full 1080x2400 video frame every 50-70ms.
             float scale = Math.min(1f, 720f / Math.max(1, sourceWidth));
             int copyWidth = Math.max(2, Math.round(sourceWidth * scale));
             int copyHeight = Math.max(2, Math.round(sourceHeight * scale));
@@ -1335,8 +1402,6 @@ public final class FloatingIosBottomNavHook {
                         result -> {
                             pixelCopyInFlight = false;
                             if (result != PixelCopy.SUCCESS
-                                    || snapshot == null
-                                    || snapshot.isRecycled()
                                     || destination.isRecycled()
                                     || !surface.isAttachedToWindow()) {
                                 if (result != PixelCopy.SUCCESS) {
@@ -1344,7 +1409,7 @@ public final class FloatingIosBottomNavHook {
                                     if (now - lastPixelCopyFailureLogAt > 3000L) {
                                         lastPixelCopyFailureLogAt = now;
                                         ModuleLog.line(
-                                                "(InstaLy | FloatingNav): video PixelCopy result="
+                                                "(InstaLy | FloatingNav): SurfaceView PixelCopy result="
                                                         + result
                                         );
                                     }
@@ -1352,8 +1417,10 @@ public final class FloatingIosBottomNavHook {
                                 return;
                             }
 
-                            overlaySurfaceCopy(surface, destination);
-                            publishSnapshot();
+                            Rect destinationRect = viewRectInLayer(surface);
+                            pixelCopyDestination = destinationRect;
+                            backdropView.setSurfacePatch(destination, destinationRect);
+                            selectionLens.setSurfacePatch(destination, destinationRect);
                         },
                         mainHandler
                 );
@@ -1363,60 +1430,86 @@ public final class FloatingIosBottomNavHook {
                 if (now - lastPixelCopyFailureLogAt > 3000L) {
                     lastPixelCopyFailureLogAt = now;
                     ModuleLog.line(
-                            "(InstaLy | FloatingNav): video PixelCopy failed",
+                            "(InstaLy | FloatingNav): SurfaceView PixelCopy failed",
                             t
                     );
                 }
             }
         }
 
-        private void overlaySurfaceCopy(SurfaceView surface, Bitmap source) {
-            int[] layerLocation = new int[2];
-            int[] surfaceLocation = new int[2];
-            getLocationInWindow(layerLocation);
-            surface.getLocationInWindow(surfaceLocation);
-
-            Rect layerWindow = new Rect(
-                    layerLocation[0],
-                    layerLocation[1],
-                    layerLocation[0] + getWidth(),
-                    layerLocation[1] + getHeight()
-            );
-            Rect surfaceWindow = new Rect(
-                    surfaceLocation[0],
-                    surfaceLocation[1],
-                    surfaceLocation[0] + surface.getWidth(),
-                    surfaceLocation[1] + surface.getHeight()
-            );
-            Rect intersection = new Rect();
-            if (!intersection.setIntersect(layerWindow, surfaceWindow)) return;
-
-            float sx = source.getWidth() / (float) Math.max(1, surface.getWidth());
-            float sy = source.getHeight() / (float) Math.max(1, surface.getHeight());
-
-            Rect src = new Rect(
-                    Math.max(0, Math.round((intersection.left - surfaceWindow.left) * sx)),
-                    Math.max(0, Math.round((intersection.top - surfaceWindow.top) * sy)),
-                    Math.min(source.getWidth(), Math.round((intersection.right - surfaceWindow.left) * sx)),
-                    Math.min(source.getHeight(), Math.round((intersection.bottom - surfaceWindow.top) * sy))
-            );
-            Rect dst = new Rect(
-                    intersection.left - layerWindow.left,
-                    intersection.top - layerWindow.top,
-                    intersection.right - layerWindow.left,
-                    intersection.bottom - layerWindow.top
-            );
-
-            if (src.width() <= 0 || src.height() <= 0 || dst.width() <= 0 || dst.height() <= 0) {
+        private void captureTextureVideo(TextureView texture) {
+            if (!texture.isAvailable()
+                    || texture.getWidth() <= 1
+                    || texture.getHeight() <= 1) {
+                clearTexturePatch();
                 return;
             }
 
-            Canvas canvas = new Canvas(snapshot);
-            Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
-            canvas.drawBitmap(source, src, dst, paint);
+            int sourceWidth = texture.getWidth();
+            int sourceHeight = texture.getHeight();
+            float scale = Math.min(1f, 720f / Math.max(1, sourceWidth));
+            int copyWidth = Math.max(2, Math.round(sourceWidth * scale));
+            int copyHeight = Math.max(2, Math.round(sourceHeight * scale));
+
+            if (textureVideoBuffer == null
+                    || textureVideoBuffer.isRecycled()
+                    || textureVideoBuffer.getWidth() != copyWidth
+                    || textureVideoBuffer.getHeight() != copyHeight
+                    || textureVideo != texture) {
+                if (textureVideoBuffer != null && !textureVideoBuffer.isRecycled()) {
+                    textureVideoBuffer.recycle();
+                }
+                textureVideoBuffer = Bitmap.createBitmap(
+                        copyWidth,
+                        copyHeight,
+                        Bitmap.Config.ARGB_8888
+                );
+                textureVideo = texture;
+            }
+
+            try {
+                Bitmap copied = texture.getBitmap(textureVideoBuffer);
+                if (copied == null) {
+                    clearTexturePatch();
+                    return;
+                }
+                textureVideoBuffer = copied;
+                textureVideoDestination = viewRectInLayer(texture);
+                backdropView.setTexturePatch(copied, textureVideoDestination);
+                selectionLens.setTexturePatch(copied, textureVideoDestination);
+            } catch (Throwable t) {
+                clearTexturePatch();
+            }
         }
 
-        private SurfaceView findTopmostIntersectingSurfaceView(View root, Rect layerRect) {
+        private Rect viewRectInLayer(View view) {
+            int[] layerLocation = new int[2];
+            int[] viewLocation = new int[2];
+            getLocationInWindow(layerLocation);
+            view.getLocationInWindow(viewLocation);
+            return new Rect(
+                    viewLocation[0] - layerLocation[0],
+                    viewLocation[1] - layerLocation[1],
+                    viewLocation[0] - layerLocation[0] + view.getWidth(),
+                    viewLocation[1] - layerLocation[1] + view.getHeight()
+            );
+        }
+
+        private void clearSurfacePatch() {
+            pixelCopySurface = null;
+            pixelCopyDestination = null;
+            backdropView.setSurfacePatch(null, null);
+            selectionLens.setSurfacePatch(null, null);
+        }
+
+        private void clearTexturePatch() {
+            textureVideo = null;
+            textureVideoDestination = null;
+            backdropView.setTexturePatch(null, null);
+            selectionLens.setTexturePatch(null, null);
+        }
+
+        private View findTopmostIntersectingVideoView(View root, Rect layerRect) {
             if (root == null
                     || root == this
                     || root == nativeBar
@@ -1427,7 +1520,7 @@ public final class FloatingIosBottomNavHook {
                 return null;
             }
 
-            if (root instanceof SurfaceView) {
+            if (root instanceof SurfaceView || root instanceof TextureView) {
                 int[] location = new int[2];
                 root.getLocationInWindow(location);
                 Rect rect = new Rect(
@@ -1436,15 +1529,14 @@ public final class FloatingIosBottomNavHook {
                         location[0] + root.getWidth(),
                         location[1] + root.getHeight()
                 );
-                return Rect.intersects(layerRect, rect) ? (SurfaceView) root : null;
+                return Rect.intersects(layerRect, rect) ? root : null;
             }
 
             if (root instanceof ViewGroup) {
                 ViewGroup group = (ViewGroup) root;
-                // Walk back-to-front so the visually topmost active video wins.
                 for (int i = group.getChildCount() - 1; i >= 0; i--) {
-                    SurfaceView found =
-                            findTopmostIntersectingSurfaceView(group.getChildAt(i), layerRect);
+                    View found =
+                            findTopmostIntersectingVideoView(group.getChildAt(i), layerRect);
                     if (found != null) return found;
                 }
             }
