@@ -1,9 +1,12 @@
 package com.mochibunr.instaly;
 
+import android.content.DialogInterface;
 import android.os.Bundle;
+import android.text.InputType;
 import android.view.View;
 import android.widget.EditText;
 import android.widget.Toast;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.recyclerview.widget.RecyclerView;
 import androidx.viewpager2.widget.ViewPager2;
@@ -53,7 +56,7 @@ public final class MainActivity extends AppCompatActivity {
                         } else if ("challenge_required".equals(result.status)) {
                             showChallenge();
                         } else {
-                            toast("Instagram login failed.");
+                            toast(result.message.isEmpty() ? "Instagram login failed." : result.message);
                         }
                     });
                 } catch (Exception e) {
@@ -71,37 +74,39 @@ public final class MainActivity extends AppCompatActivity {
     private void showVerification(String loginId) {
         EditText code = new EditText(this);
         code.setHint("Verification code");
-        code.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);
-        new MaterialAlertDialogBuilder(this)
+        code.setInputType(InputType.TYPE_CLASS_NUMBER);
+
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
             .setTitle("Instagram verification")
             .setMessage("Enter the code Instagram sent to you.")
             .setView(code)
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Verify", null)
-            .create()
-            .setOnShowListener(d -> {
-                androidx.appcompat.app.AlertDialog dialog = (androidx.appcompat.app.AlertDialog) d;
-                dialog.getButton(android.content.DialogInterface.BUTTON_POSITIVE).setOnClickListener(v -> {
-                    String value = code.getText().toString().trim();
-                    if (value.isEmpty()) return;
-                    v.setEnabled(false);
-                    network.execute(() -> {
-                        try {
-                            InstagramAuthProviderImpl.AuthResult result = auth.verify(loginId, value);
-                            runOnUiThread(() -> {
-                                dialog.dismiss();
-                                if ("authenticated".equals(result.status)) showReels(new DemoReelRepository());
-                                else toast("Verification failed.");
-                            });
-                        } catch (Exception e) {
-                            runOnUiThread(() -> {
-                                v.setEnabled(true);
-                                toast(e.getMessage() == null ? "Verification failed." : e.getMessage());
-                            });
-                        }
-                    });
+            .create();
+
+        dialog.setOnShowListener(d -> {
+            dialog.getButton(DialogInterface.BUTTON_POSITIVE).setOnClickListener(v -> {
+                String value = code.getText().toString().trim();
+                if (value.isEmpty()) return;
+                v.setEnabled(false);
+                network.execute(() -> {
+                    try {
+                        InstagramAuthProviderImpl.AuthResult result = auth.verify(loginId, value);
+                        runOnUiThread(() -> {
+                            dialog.dismiss();
+                            if ("authenticated".equals(result.status)) showReels(new DemoReelRepository());
+                            else toast(result.message.isEmpty() ? "Verification failed." : result.message);
+                        });
+                    } catch (Exception e) {
+                        runOnUiThread(() -> {
+                            v.setEnabled(true);
+                            toast(e.getMessage() == null ? "Verification failed." : e.getMessage());
+                        });
+                    }
                 });
-            }).show();
+            });
+        });
+        dialog.show();
     }
 
     private void showChallenge() {
