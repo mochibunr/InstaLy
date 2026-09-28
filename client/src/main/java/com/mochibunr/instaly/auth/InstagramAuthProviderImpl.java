@@ -1,9 +1,41 @@
 package com.mochibunr.instaly.auth;
-import android.content.*;
-/** Local state only; real Instagram authentication is injected through this boundary. */
+
+import android.content.Context;
+
+/**
+ * Client-side auth state.
+ *
+ * Instagram credentials are never persisted here. The backend exchanges a
+ * login for an InstaLy session token; this class stores that token encrypted.
+ */
 public final class InstagramAuthProviderImpl implements InstagramAuthProvider {
- private static final String P="instaly_auth",C="connected"; private final SharedPreferences prefs;
- public InstagramAuthProviderImpl(Context c){prefs=c.getSharedPreferences(P,Context.MODE_PRIVATE);}
- public boolean isConnected(){return prefs.getBoolean(C,false);} public void beginLogin(){} public void logout(){prefs.edit().clear().apply();}
- public void markDemoConnected(){prefs.edit().putBoolean(C,true).apply();}
+    private final AuthSessionStore sessions;
+
+    public InstagramAuthProviderImpl(Context context) {
+        sessions = new AuthSessionStore(context.getApplicationContext());
+    }
+
+    @Override
+    public boolean isConnected() {
+        return sessions.isConnected();
+    }
+
+    @Override
+    public void beginLogin() {
+        // Real login is performed by the configured HTTPS auth backend.
+        // Do not put Instagram username/password persistence in this class.
+    }
+
+    public void acceptBackendSession(String sessionToken) {
+        sessions.saveSessionToken(sessionToken);
+    }
+
+    public String getBackendSession() {
+        return sessions.readSessionToken();
+    }
+
+    @Override
+    public void logout() {
+        sessions.clear();
+    }
 }
