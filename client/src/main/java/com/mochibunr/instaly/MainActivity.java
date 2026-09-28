@@ -1,5 +1,7 @@
 package com.mochibunr.instaly;
-import android.content.*; import android.os.*; import android.view.*; import android.widget.*; import androidx.appcompat.app.*; import androidx.recyclerview.widget.RecyclerView; import androidx.viewpager2.widget.ViewPager2; import com.google.android.material.dialog.MaterialAlertDialogBuilder; import com.mochibunr.instaly.auth.*; import com.mochibunr.instaly.data.*; import com.mochibunr.instaly.ui.*;
+import android.content.*; import android.net.Uri; import android.os.*; import android.view.*; import android.widget.*;
+import androidx.appcompat.app.*; import androidx.recyclerview.widget.RecyclerView; import androidx.viewpager2.widget.ViewPager2;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder; import com.mochibunr.instaly.auth.*; import com.mochibunr.instaly.data.*; import com.mochibunr.instaly.ui.*;
 public final class MainActivity extends AppCompatActivity{
  private ViewPager2 pager; private ReelPagerAdapter adapter; private InstagramAuthProviderImpl auth;
  @Override protected void onCreate(Bundle b){super.onCreate(b);auth=new InstagramAuthProviderImpl(this);showLogin();}
