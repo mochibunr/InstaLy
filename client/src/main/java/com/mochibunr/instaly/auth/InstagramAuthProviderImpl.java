@@ -8,7 +8,7 @@ import java.net.URL;
 import java.nio.charset.StandardCharsets;
 
 public final class InstagramAuthProviderImpl implements InstagramAuthProvider {
-    private static final String API_BASE = "https://YOUR-INSTALY-BACKEND.example/v1";
+    private static final String API_BASE = BuildConfig.INSTALY_API_BASE_URL;
     private final AuthSessionStore sessions;
 
     public InstagramAuthProviderImpl(Context context) {
