@@ -1,5 +1,6 @@
 plugins { alias(libs.plugins.android.application) }
 android {
+    buildFeatures { buildConfig true }
     namespace 'com.mochibunr.instaly'
     compileSdk 36
     defaultConfig {
@@ -8,6 +9,7 @@ android {
         targetSdk 36
         versionCode 1
         versionName "0.1.0"
+        buildConfigField "String", "INSTALY_API_BASE_URL", "\"https://YOUR-INSTALY-BACKEND.example/v1\""
     }
     buildTypes { release { minifyEnabled false; proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro' } }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
