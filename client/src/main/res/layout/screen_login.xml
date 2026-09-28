@@ -1,0 +1,9 @@
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:background="@color/black" android:gravity="center_horizontal" android:orientation="vertical" android:paddingStart="28dp" android:paddingEnd="28dp">
+<Space android:layout_width="1dp" android:layout_height="0dp" android:layout_weight="1"/>
+<TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="InstaLy" android:textColor="@color/white" android:textSize="42sp" android:textStyle="bold" android:fontFamily="cursive"/>
+<TextView android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="10dp" android:text="Your Instagram, your way." android:textColor="@color/muted" android:textSize="15sp"/>
+<com.google.android.material.button.MaterialButton android:id="@+id/connectInstagram" android:layout_width="match_parent" android:layout_height="52dp" android:layout_marginTop="44dp" android:text="Connect Instagram" android:textAllCaps="false"/>
+<com.google.android.material.button.MaterialButton android:id="@+id/demoFeed" style="@style/Widget.Material3.Button.TextButton" android:layout_width="match_parent" android:layout_height="52dp" android:layout_marginTop="8dp" android:text="Explore demo feed" android:textAllCaps="false"/>
+<TextView android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="28dp" android:gravity="center" android:text="Instagram connection is kept behind a replaceable auth provider. InstaLy never asks you to hand your Instagram password to a third-party server." android:textColor="#77777F" android:textSize="12sp"/>
+<Space android:layout_width="1dp" android:layout_height="0dp" android:layout_weight="1"/>
+</LinearLayout>

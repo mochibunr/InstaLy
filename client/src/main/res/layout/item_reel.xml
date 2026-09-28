@@ -1,0 +1,14 @@
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android" android:layout_width="match_parent" android:layout_height="match_parent" android:background="#050505">
+<androidx.media3.ui.PlayerView android:id="@+id/player" android:layout_width="match_parent" android:layout_height="match_parent" android:useController="false"/>
+<View android:layout_width="match_parent" android:layout_height="180dp" android:layout_gravity="bottom" android:background="#66000000"/>
+<LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_gravity="bottom" android:orientation="vertical" android:paddingStart="16dp" android:paddingEnd="92dp" android:paddingBottom="86dp">
+<TextView android:id="@+id/author" android:layout_width="wrap_content" android:layout_height="wrap_content" android:textColor="@color/white" android:textSize="15sp" android:textStyle="bold"/>
+<TextView android:id="@+id/caption" android:layout_width="match_parent" android:layout_height="wrap_content" android:layout_marginTop="7dp" android:maxLines="3" android:textColor="@color/white" android:textSize="14sp"/>
+<TextView android:id="@+id/audio" android:layout_width="wrap_content" android:layout_height="wrap_content" android:layout_marginTop="9dp" android:textColor="#DDFFFFFF" android:textSize="12sp"/>
+</LinearLayout>
+<LinearLayout android:layout_width="60dp" android:layout_height="wrap_content" android:layout_gravity="end|bottom" android:layout_marginEnd="10dp" android:layout_marginBottom="88dp" android:gravity="center" android:orientation="vertical">
+<TextView android:layout_width="match_parent" android:layout_height="54dp" android:gravity="center" android:text="♡\n12.4K" android:textColor="@color/white" android:textSize="18sp"/>
+<TextView android:layout_width="match_parent" android:layout_height="54dp" android:gravity="center" android:text="◯\n284" android:textColor="@color/white" android:textSize="18sp"/>
+<TextView android:layout_width="match_parent" android:layout_height="54dp" android:gravity="center" android:text="↗" android:textColor="@color/white" android:textSize="22sp"/>
+<TextView android:layout_width="match_parent" android:layout_height="54dp" android:gravity="center" android:text="•••" android:textColor="@color/white" android:textSize="18sp"/>
+</LinearLayout></FrameLayout>
